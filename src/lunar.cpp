@@ -218,4 +218,79 @@ std::string today_iso() {
     return buf;
 }
 
+// ---------------- 24 节气 ----------------
+// 寿星通用公式：Day = int(Y*0.2422 + C) - int(Y/4)，Y=年份后两位，C=世纪常数
+
+// 节气按年内序号 0..23（从小寒起，即 1 月节气在前）
+static const char* kTermNames[24] = {
+    "小寒", "大寒", "立春", "雨水", "惊蛰", "春分",
+    "清明", "谷雨", "立夏", "小满", "芒种", "夏至",
+    "小暑", "大暑", "立秋", "处暑", "白露", "秋分",
+    "寒露", "霜降", "立冬", "小雪", "大雪", "冬至"
+};
+// 每个节气所在月份（序号 0=小寒 在 1 月，依此类推）
+static const int kTermMonth[24] = {
+    1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+    7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12
+};
+// 21 世纪（2000-2099）C 值
+static const double kC21[24] = {
+    5.4055, 20.12, 3.87, 18.73, 5.63, 20.646,
+    4.81, 20.1, 5.52, 21.04, 5.678, 21.37,
+    7.108, 22.83, 7.5, 23.13, 7.646, 23.042,
+    8.318, 23.438, 7.438, 22.36, 7.18, 21.94
+};
+// 20 世纪（1900-1999）C 值
+static const double kC20[24] = {
+    6.11, 20.84, 4.6297, 19.4599, 6.3826, 21.4155,
+    5.59, 20.888, 6.318, 21.86, 6.5, 22.20,
+    7.928, 23.65, 8.35, 23.95, 8.44, 23.822,
+    9.098, 24.218, 8.218, 23.08, 7.9, 22.60
+};
+
+// 已知例外修正（返回需加减的天数）
+static int term_fix(int year, int term) {
+    if (year == 2008 && term == 0) return 1;    // 2008 小寒 +1
+    if (year == 2082 && term == 1) return 1;    // 2082 大寒 +1
+    return 0;
+}
+
+// 计算某年某节气（序号 term）在公历中的日期（day），失败返回 0
+static int term_day_of_month(int year, int term) {
+    if (year < 1900 || year > 2099) return 0;
+    int y = year % 100;
+    double c = (year >= 2000) ? kC21[term] : kC20[term];
+    int d = static_cast<int>(y * 0.2422 + c) - (y / 4) + term_fix(year, term);
+    return d;
+}
+
+std::string solar_term(int year, int month, int day) {
+    if (year < 1900 || year > 2099) return "";
+    for (int t = 0; t < 24; ++t) {
+        if (kTermMonth[t] != month) continue;
+        if (term_day_of_month(year, t) == day) return kTermNames[t];
+    }
+    return "";
+}
+
+// ---------------- 法定节假日 ----------------
+std::string statutory_holiday(int year, int month, int day) {
+    if (year < 1901 || year > 2099) return "";
+    // 公历固定日
+    if (month == 1 && day == 1) return "元旦";
+    if (month == 5 && day == 1) return "劳动节";
+    if (month == 10 && day >= 1 && day <= 3) return "国庆节";
+    // 清明：当月（4 月）节气"清明"当日
+    if (month == 4 && !solar_term(year, 4, day).empty() &&
+        solar_term(year, 4, day) == "清明")
+        return "清明节";
+    // 农历推导：春节(正月初一~初三)、端午(五月初五)、中秋(八月十五)
+    LunarDate ld = solar_to_lunar(year, month, day);
+    if (ld.year == 0) return "";
+    if (ld.month == 1 && !ld.isLeap && ld.day >= 1 && ld.day <= 3) return "春节";
+    if (ld.month == 5 && !ld.isLeap && ld.day == 5) return "端午节";
+    if (ld.month == 8 && !ld.isLeap && ld.day == 15) return "中秋节";
+    return "";
+}
+
 } // namespace lunar

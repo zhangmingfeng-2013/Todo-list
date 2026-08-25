@@ -40,4 +40,11 @@ std::string add_days_iso(const std::string& iso, int days);
 int weekday_of_iso(const std::string& iso);   // 1=周一 ... 7=周日
 std::string today_iso();
 
+// 24 节气：返回当日节气名（如 "清明"），非节气日返回 ""
+std::string solar_term(int year, int month, int day);
+
+// 法定节假日名（元旦/春节/清明/劳动节/端午/中秋/国庆，仅节日当天不含调休）；
+// 非节日返回 ""；农历推导范围 1901-2099
+std::string statutory_holiday(int year, int month, int day);
+
 } // namespace lunar

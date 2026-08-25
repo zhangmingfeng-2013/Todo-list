@@ -17,6 +17,13 @@
 #include "importer.hpp"
 #include "json.hpp"
 #include "storage.hpp"
+#include "exporter.hpp"
+#include "backup.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <set>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -52,19 +59,28 @@ static void print_help() {
         "  tree                             查看任务树（子任务缩进）\n"
         "  done <id>                         完成（重复任务自动生成下一次）\n"
         "  undo <id>                         恢复\n"
-        "  rm <id>                           删除\n"
+        "  rm <id> [--purge]                 删除（默认进回收站，--purge 彻底删除）\n"
+        "  restore <id>                      从回收站恢复任务\n"
+        "  trash [clear]                     回收站列表 / 清空\n"
         "  dep <id> <依赖id>                 设置依赖（依赖完成后才能开始）\n"
         "  undep <id> <依赖id>               移除依赖\n\n"
         "组织:\n"
         "  projects                         项目列表\n"
         "  calendar [--month YYYY-MM]       月历视图\n"
         "  tags                             标签列表\n"
+        "  stats                            统计概览（完成趋势/逾期/番茄钟）\n"
+        "  digest                           每日摘要（农历/节气/今日任务）\n"
         "  filter add \"名称\" \"条件JSON\"    保存筛选\n"
         "  filter list / filter rm <id>\n\n"
         "导入 (滴答/Todoist/Todo.txt):\n"
         "  import <文件> [--format todotxt|todoist|ticktick|csv] [--db PATH]\n\n"
+        "导出:\n"
+        "  export [--format todotxt|json|csv] [--out 文件]\n\n"
+        "备份:\n"
+        "  backup [now|list|restore <文件>] 立即备份 / 列出 / 从备份恢复（serve 每日自动备份）\n\n"
         "节假日 (重复任务跳过):\n"
-        "  holiday add YYYY-MM-DD / holiday list / holiday rm YYYY-MM-DD\n\n"
+        "  holiday add YYYY-MM-DD / holiday list / holiday rm YYYY-MM-DD\n"
+        "  holiday auto [--year N]          自动生成某年法定节假日（含农历/节气推导）\n\n"
         "存储 (U盘 / 可移动盘):\n"
         "  storage                        查看当前存储位置\n"
         "  storage list                   列出可用卷（U盘会标记 ◈）\n"
@@ -106,7 +122,8 @@ static std::string color_status(const std::string& s) {
 static const char* kReset = "\033[0m";
 
 static void print_task_line(Db& db, long long id, int depth, bool show_id) {
-    auto row = db.query_one("SELECT * FROM tasks WHERE id=?", {std::to_string(id)});
+    auto row = db.query_one("SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL",
+                            {std::to_string(id)});
     if (!row) return;
     std::string indent(static_cast<size_t>(depth) * 2, ' ');
     std::string due = row->get("due_date");
@@ -144,7 +161,7 @@ static void print_task_line(Db& db, long long id, int depth, bool show_id) {
 
 static void print_tree_rec(Db& db, long long parent, int depth) {
     std::vector<long long> kids;
-    for (auto& r : db.query("SELECT id FROM tasks WHERE parent_id=? ORDER BY sort_order, id",
+    for (auto& r : db.query("SELECT id FROM tasks WHERE deleted_at IS NULL AND parent_id=? ORDER BY sort_order, id",
                             {parent == 0 ? "" : std::to_string(parent)})) {
         // parent==0 → 根任务
         kids.push_back(r.get_int("id"));
@@ -152,7 +169,7 @@ static void print_tree_rec(Db& db, long long parent, int depth) {
     // 处理根任务（parent_id IS NULL）
     if (parent == 0) {
         for (auto& r : db.query(
-                 "SELECT id FROM tasks WHERE parent_id IS NULL "
+                 "SELECT id FROM tasks WHERE deleted_at IS NULL AND parent_id IS NULL "
                  "ORDER BY CASE status WHEN 'done' THEN 1 ELSE 0 END, priority DESC, "
                  "COALESCE(due_date,'9999-12-31'), sort_order, id")) {
             kids.push_back(r.get_int("id"));
@@ -265,7 +282,7 @@ static int cmd_list(Db& db, const std::vector<std::string>& args) {
         else if (args[i] == "--due" && i + 1 < args.size()) due_n = args[++i];
         else if (args[i] == "--all") status = "all";
     }
-    std::string sql = "SELECT * FROM tasks WHERE 1=1";
+    std::string sql = "SELECT * FROM tasks WHERE deleted_at IS NULL";
     if (status != "all") sql += " AND status='" + status + "'";
     if (today) {
         std::string t = lunar::today_iso();
@@ -298,7 +315,7 @@ static int cmd_list(Db& db, const std::vector<std::string>& args) {
 static int cmd_done_undo(Db& db, const std::vector<std::string>& args, bool done) {
     if (args.empty()) { std::cerr << "错误: 缺少任务 ID\n"; return 1; }
     long long id = std::atoll(args[0].c_str());
-    auto row = db.query_one("SELECT * FROM tasks WHERE id=?", {std::to_string(id)});
+    auto row = db.query_one("SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL", {std::to_string(id)});
     if (!row) { std::cerr << "任务不存在 #" << id << "\n"; return 1; }
     if (done) {
         db.exec("UPDATE tasks SET status='done', completed_at=datetime('now','localtime') "
@@ -391,13 +408,13 @@ static int cmd_calendar(Db& db, const std::vector<std::string>& args) {
         bool is_today = d == today;
         // 标记到期任务
         auto cnt = db.query_one(
-            "SELECT COUNT(*) c FROM tasks WHERE status!='done' AND "
+            "SELECT COUNT(*) c FROM tasks WHERE deleted_at IS NULL AND status!='done' AND "
             "(due_date=? OR start_date=? OR "
             "(repeat_rule!='' AND due_date IS NULL))", {d, d});
         long long c = cnt ? cnt->get_int("c") : 0;
         // 重复实例粗略统计
         long long rep_c = 0;
-        for (auto& r : db.query("SELECT due_date,repeat_rule FROM tasks WHERE repeat_rule!='' AND status!='done'")) {
+        for (auto& r : db.query("SELECT due_date,repeat_rule FROM tasks WHERE deleted_at IS NULL AND repeat_rule!='' AND status!='done'")) {
             RepeatRule rr = RepeatRule::from_json_str(r.get("repeat_rule"));
             if (!rr.enabled()) continue;
             auto occ = recurrence::occurrences_in_range(rr, d, d, holiday);
@@ -414,7 +431,7 @@ static int cmd_calendar(Db& db, const std::vector<std::string>& args) {
     std::cout << "\n";
     // 当日任务
     auto today_rows = db.query(
-        "SELECT * FROM tasks WHERE status!='done' AND (due_date=? OR start_date=?) "
+        "SELECT * FROM tasks WHERE deleted_at IS NULL AND status!='done' AND (due_date=? OR start_date=?) "
         "ORDER BY priority DESC", {today, today});
     if (!today_rows.empty()) {
         std::cout << "今日任务:\n";
@@ -451,8 +468,40 @@ static int cmd_dep(Db& db, const std::vector<std::string>& args, bool add) {
 }
 
 static int cmd_holiday(Db& db, const std::vector<std::string>& args) {
-    if (args.empty()) { std::cerr << "用法: holiday add|list|rm <YYYY-MM-DD>\n"; return 1; }
+    if (args.empty()) { std::cerr << "用法: holiday add|list|rm|auto [YYYY-MM-DD|--year N]\n"; return 1; }
     std::string op = args[0];
+    if (op == "auto") {
+        std::string ys;
+        arg_has(args, "--year", ys);
+        int year = ys.empty() ? 0 : std::atoi(ys.c_str());
+        if (year == 0) {
+            int y = 0, m = 0, d = 0;
+            std::sscanf(lunar::today_iso().c_str(), "%d-%d-%d", &y, &m, &d);
+            year = y;
+        }
+        if (year < 1901 || year > 2099) {
+            std::cerr << "错误: 年份应在 1901-2099（农历推导范围）\n";
+            return 1;
+        }
+        int added = 0;
+        std::cout << "—— " << year << " 年法定节假日 ——\n";
+        for (int m = 1; m <= 12; ++m) {
+            int dim = 31;
+            if (m == 4 || m == 6 || m == 9 || m == 11) dim = 30;
+            if (m == 2) dim = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) ? 29 : 28;
+            for (int d = 1; d <= dim; ++d) {
+                std::string name = lunar::statutory_holiday(year, m, d);
+                if (name.empty()) continue;
+                char iso[16];
+                std::snprintf(iso, sizeof iso, "%04d-%02d-%02d", year, m, d);
+                db.exec("INSERT OR IGNORE INTO holidays(date) VALUES('" + std::string(iso) + "')");
+                std::cout << "  " << iso << "  " << name << "\n";
+                ++added;
+            }
+        }
+        std::cout << "共 " << added << " 天已写入节假日表（重复任务将自动跳过）\n";
+        return 0;
+    }
     if (op == "list") {
         for (auto& h : db.query("SELECT date FROM holidays ORDER BY date"))
             std::cout << h.get("date") << "\n";
@@ -475,7 +524,7 @@ static int cmd_holiday(Db& db, const std::vector<std::string>& args) {
 static int cmd_projects(Db& db) {
     for (auto& p : db.query("SELECT * FROM projects ORDER BY sort_order, name")) {
         auto cnt = db.query_one(
-            "SELECT COUNT(*) c FROM tasks WHERE project_id=? AND status!='done'",
+            "SELECT COUNT(*) c FROM tasks WHERE deleted_at IS NULL AND project_id=? AND status!='done'",
             {std::to_string(p.get_int("id"))});
         std::cout << "#" << p.get_int("id") << " " << p.get("name")
                   << " (" << (cnt ? cnt->get_int("c") : 0) << " 个未完成任务)\n";
@@ -494,7 +543,6 @@ static int cmd_tags(Db& db) {
     return 0;
 }
 
-// ---- 存储位置管理 ----
 static std::string human_size(long long bytes) {
     char buf[32];
     if (bytes >= 1LL << 30) std::snprintf(buf, sizeof buf, "%.1f GB", bytes / 1073741824.0);
@@ -504,6 +552,218 @@ static std::string human_size(long long bytes) {
     return buf;
 }
 
+// ---- 回收站 ----
+static int cmd_trash(Db& db, const std::vector<std::string>& args) {
+    if (!args.empty() && (args[0] == "clear" || args[0] == "empty")) {
+        db.exec("DELETE FROM tasks WHERE deleted_at IS NOT NULL");
+        std::cout << "回收站已清空\n";
+        return 0;
+    }
+    auto rows = db.query(
+        "SELECT * FROM tasks WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC");
+    if (rows.empty()) { std::cout << "（回收站为空）\n"; return 0; }
+    for (auto& r : rows)
+        std::cout << "#" << r.get_int("id") << " " << status_mark(r.get("status"))
+                  << " " << r.get("title")
+                  << "  (删除于 " << r.get("deleted_at") << ")\n";
+    std::cout << "共 " << rows.size() << " 条 · 恢复: todo restore <id> · 清空: todo trash clear\n";
+    return 0;
+}
+
+static int cmd_restore(Db& db, const std::vector<std::string>& args) {
+    if (args.empty()) { std::cerr << "错误: 缺少任务 ID\n"; return 1; }
+    long long id = std::atoll(args[0].c_str());
+    auto row = db.query_one("SELECT title FROM tasks WHERE id=? AND deleted_at IS NOT NULL",
+                            {std::to_string(id)});
+    if (!row) { std::cerr << "回收站中不存在 #" << id << "\n"; return 1; }
+    db.exec("UPDATE tasks SET deleted_at=NULL, updated_at=datetime('now','localtime') "
+            "WHERE id=" + std::to_string(id));
+    std::cout << "✓ 已从回收站恢复 #" << id << ": " << row->get("title") << "\n";
+    return 0;
+}
+
+// ---- 导出 ----
+static int cmd_export(Db& db, const std::vector<std::string>& args) {
+    std::string format = "todotxt", out;
+    arg_has(args, "--format", format);
+    arg_has(args, "--out", out);
+    if (format != "todotxt" && format != "json" && format != "csv") {
+        std::cerr << "错误: --format 应为 todotxt|json|csv\n";
+        return 1;
+    }
+    std::string data = exporter::export_tasks(db, format);
+    if (out.empty()) out = "todo-export-" + lunar::today_iso() + "." + format;
+    std::ofstream f(out, std::ios::binary);
+    if (!f) { std::cerr << "无法写入文件: " << out << "\n"; return 1; }
+    f << data;
+    f.close();
+    auto cnt = db.query_one("SELECT COUNT(*) c FROM tasks WHERE deleted_at IS NULL");
+    std::cout << "✓ 已导出 " << (cnt ? cnt->get_int("c") : 0) << " 个任务 → " << out
+              << "（" << human_size(static_cast<long long>(data.size())) << "）\n";
+    return 0;
+}
+
+// ---- 每日摘要 ----
+static int cmd_digest(Db& db) {
+    std::cout << exporter::daily_digest(db) << "\n";
+    return 0;
+}
+
+// ---- 统计概览 ----
+static int cmd_stats(Db& db) {
+    std::string today = lunar::today_iso();
+    auto cnt = [&](const std::string& cond) -> long long {
+        auto r = db.query_one("SELECT COUNT(*) c FROM tasks WHERE deleted_at IS NULL AND " + cond);
+        return r ? r->get_int("c") : 0;
+    };
+    std::cout << "—— 统计概览（截至 " << today << "）——\n";
+    std::cout << "待办 " << cnt("status='todo'")
+              << " · 进行中 " << cnt("status='doing'")
+              << " · 已完成 " << cnt("status='done'")
+              << " · 逾期 " << cnt("status!='done' AND due_date IS NOT NULL AND due_date<'" + today + "'")
+              << " · 今日到期 " << cnt("status!='done' AND due_date='" + today + "'") << "\n";
+    // 最近 7 天完成趋势
+    std::cout << "近 7 天完成: ";
+    for (int i = 6; i >= 0; --i) {
+        std::string d = lunar::add_days_iso(today, -i);
+        std::cout << d.substr(5) << "=" << cnt("status='done' AND completed_at LIKE '" + d + "%' ")
+                  << " ";
+    }
+    std::cout << "\n";
+    // 连续打卡
+    int streak = 0;
+    for (int i = 0; i < 3650; ++i) {
+        std::string d = lunar::add_days_iso(today, -i);
+        if (cnt("status='done' AND completed_at LIKE '" + d + "%' ") > 0) ++streak;
+        else if (i > 0) break;
+    }
+    auto pomo = db.query_one(
+        "SELECT COALESCE(SUM(pomodoros),0) s FROM tasks WHERE deleted_at IS NULL");
+    std::cout << "连续打卡 " << streak << " 天 · 番茄钟累计 "
+              << (pomo ? pomo->get_int("s") : 0) << " 个\n";
+    // 项目进度
+    auto projs = db.query(
+        "SELECT p.name, "
+        "SUM(CASE WHEN t.status!='done' THEN 1 ELSE 0 END) open, "
+        "SUM(CASE WHEN t.status='done' THEN 1 ELSE 0 END) done "
+        "FROM projects p LEFT JOIN tasks t ON t.project_id=p.id AND t.deleted_at IS NULL "
+        "GROUP BY p.id ORDER BY open DESC LIMIT 10");
+    if (!projs.empty()) {
+        std::cout << "项目进度:\n";
+        for (auto& p : projs) {
+            long long open = p.get_int("open"), done = p.get_int("done");
+            int total = static_cast<int>(open + done);
+            int pct = total ? static_cast<int>(done * 100 / total) : 0;
+            int filled = pct / 10;
+            std::cout << "  " << p.get("name") << "  [";
+            for (int i = 0; i < 10; ++i) std::cout << (i < filled ? "█" : "░");
+            std::cout << "] " << pct << "% (" << done << "/" << total << ")\n";
+        }
+    }
+    return 0;
+}
+
+// ---- 备份 ----
+static int cmd_backup(Db& db, const std::vector<std::string>& args) {
+    std::string op = args.empty() ? "now" : args[0];
+    if (op == "list") {
+        auto files = backup::list_backups(db);
+        if (files.empty()) { std::cout << "（暂无备份）\n"; return 0; }
+        for (auto& b : files)
+            std::cout << "  " << b.name << "  " << human_size(b.sizeBytes)
+                      << "  " << b.path << "\n";
+        return 0;
+    }
+    if (op == "restore") {
+        if (args.size() < 2) {
+            std::cerr << "用法: backup restore <备份文件名或完整路径>\n";
+            return 1;
+        }
+        fs::path src = args[1];
+        if (src.is_relative()) {
+            fs::path dir = fs::path(db.path()).parent_path() / "backups";
+            if (fs::exists(dir / src)) src = dir / src;
+        }
+        if (!fs::exists(src)) { std::cerr << "备份文件不存在: " << args[1] << "\n"; return 1; }
+        // 当前状态先留底，防止恢复错了
+        std::string err = backup::backup_now(db, 0);
+        if (!err.empty()) std::cerr << "警告: 恢复前备份失败(" << err << ")，继续恢复\n";
+        db.checkpoint();
+        std::error_code ec;
+        fs::copy_file(src, fs::path(db.path()), fs::copy_options::overwrite_existing, ec);
+        if (ec) { std::cerr << "恢复失败: " << ec.message() << "\n"; return 1; }
+        db.reopen(db.path());
+        init_schema(db);
+        std::cout << "✓ 已从备份恢复: " << src.string() << "\n"
+                  << "  （恢复前的状态已另存一份备份）\n";
+        return 0;
+    }
+    if (op == "now") {
+        std::string err = backup::backup_now(db);
+        if (!err.empty()) { std::cerr << "备份失败: " << err << "\n"; return 1; }
+        std::cout << "✓ 备份完成（<库目录>/backups/，保留最近 10 份）\n";
+        return 0;
+    }
+    std::cerr << "未知操作: " << op << "（可用: now / list / restore）\n";
+    return 1;
+}
+
+// ---- 系统通知（macOS） ----
+static void send_notification(const std::string& title, const std::string& msg) {
+#ifdef __APPLE__
+    // AppleScript 字符串内转义双引号与反斜杠
+    auto esc = [](const std::string& s) {
+        std::string r;
+        for (char c : s) {
+            if (c == '"' || c == '\\') r += '\\';
+            r += c;
+        }
+        return r;
+    };
+    std::string cmd = "osascript -e 'display notification \"" + esc(msg) +
+                      "\" with title \"" + esc(title) + "\"' >/dev/null 2>&1 &";
+    std::system(cmd.c_str());
+#else
+    (void)title; (void)msg;
+#endif
+}
+
+// 提醒轮询线程：每 20 秒检查当日到期任务的 remind_time
+static void reminder_thread(Db* pdb, std::atomic<bool>* running) {
+    std::set<std::string> notified;   // key: 日期|id|时间
+    // 记录启动时刻 HH:MM，只通知启动之后到期的提醒（避免重启时轰炸历史提醒）
+    std::time_t st = std::time(nullptr);
+    std::tm stm{};
+    localtime_r(&st, &stm);
+    char start_hhmm[8];
+    std::snprintf(start_hhmm, sizeof start_hhmm, "%02d:%02d", stm.tm_hour, stm.tm_min);
+    while (running->load()) {
+        try {
+            std::time_t now = std::time(nullptr);
+            std::tm tmv{};
+            localtime_r(&now, &tmv);
+            char hhmm[8];
+            std::snprintf(hhmm, sizeof hhmm, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+            std::string today = lunar::today_iso();
+            for (auto& r : pdb->query(
+                     "SELECT id,title,remind_time FROM tasks WHERE deleted_at IS NULL "
+                     "AND has_reminder=1 AND remind_time IS NOT NULL "
+                     "AND remind_time<='" + std::string(hhmm) + "' "
+                     "AND remind_time>='" + std::string(start_hhmm) + "' "
+                     "AND (due_date='" + today + "' OR start_date='" + today + "')")) {
+                std::string key = today + "|" + r.get("id") + "|" + r.get("remind_time");
+                if (notified.count(key)) continue;
+                notified.insert(key);
+                send_notification("cpp-todo 提醒",
+                                  r.get("title") + " ⏰ " + r.get("remind_time"));
+            }
+        } catch (...) {}
+        for (int i = 0; i < 20 && running->load(); ++i)
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+}
+
+// ---- 存储位置管理 ----
 static int cmd_storage(Db& db, const std::vector<std::string>& args) {
     std::string op = args.empty() ? "info" : args[0];
 
@@ -557,6 +817,16 @@ static int cmd_storage(Db& db, const std::vector<std::string>& args) {
 // ---- 服务模式 ----
 static int cmd_serve(Db& db, const Options& opt) {
     init_schema(db);
+    // 启动时：每日自动备份 + 回收站 30 天清理
+    {
+        std::string err = backup::auto_daily(db);
+        if (!err.empty()) std::cerr << "  自动备份失败: " << err << "\n";
+        else std::cout << "✓ 每日备份完成（<库目录>/backups/）\n";
+        db.exec("DELETE FROM tasks WHERE deleted_at IS NOT NULL "
+                "AND deleted_at < datetime('now','localtime','-30 day')");
+    }
+    std::cout << "\n" << exporter::daily_digest(db) << "\n\n";
+
     HttpServer srv("web");
     Api api(db, "web");
     api.register_routes(srv);
@@ -564,7 +834,7 @@ static int cmd_serve(Db& db, const Options& opt) {
         std::cerr << "启动失败：端口 " << opt.port << " 被占用或不可用\n";
         return 1;
     }
-    std::cout << "\n✓ cpp-todo 服务已启动（零账号 · 数据仅存本机）\n";
+    std::cout << "✓ cpp-todo 服务已启动（零账号 · 数据仅存本机）\n";
     std::cout << "  地址: http://127.0.0.1:" << opt.port << "/\n";
     std::cout << "  数据库: " << opt.db_path << "\n";
     std::cout << "  按 Ctrl+C 停止\n\n";
@@ -574,7 +844,12 @@ static int cmd_serve(Db& db, const Options& opt) {
         std::system(cmd.c_str());
 #endif
     }
+    // 提醒通知线程（20s 轮询 remind_time）
+    std::atomic<bool> running{true};
+    std::thread rt(reminder_thread, &db, &running);
+    rt.detach();
     srv.run_loop();
+    running = false;
     return 0;
 }
 
@@ -628,10 +903,21 @@ int main(int argc, char** argv) {
     if (cmd == "rm" || cmd == "del") {
         if (rest.empty()) { std::cerr << "错误: 缺少任务 ID\n"; return 1; }
         long long id = std::atoll(rest[0].c_str());
-        db.exec("DELETE FROM tasks WHERE id=" + std::to_string(id));
-        std::cout << "已删除 #" << id << "\n";
+        if (arg_flag(rest, "--purge"))
+            db.exec("DELETE FROM tasks WHERE id=" + std::to_string(id));
+        else
+            db.exec("UPDATE tasks SET deleted_at=datetime('now','localtime') "
+                    "WHERE id=" + std::to_string(id));
+        std::cout << (arg_flag(rest, "--purge") ? "已彻底删除 #" : "已移入回收站 #")
+                  << id << "\n";
         return 0;
     }
+    if (cmd == "restore") return cmd_restore(db, rest);
+    if (cmd == "trash") return cmd_trash(db, rest);
+    if (cmd == "export") return cmd_export(db, rest);
+    if (cmd == "digest") return cmd_digest(db);
+    if (cmd == "stats") return cmd_stats(db);
+    if (cmd == "backup") return cmd_backup(db, rest);
     if (cmd == "tree") return cmd_tree(db);
     if (cmd == "calendar" || cmd == "cal") return cmd_calendar(db, rest);
     if (cmd == "projects") return cmd_projects(db);

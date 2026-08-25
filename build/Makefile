@@ -153,6 +153,30 @@ src/api.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/todo.dir/build.make CMakeFiles/todo.dir/src/api.cpp.s
 .PHONY : src/api.cpp.s
 
+src/backup.o: src/backup.cpp.o
+.PHONY : src/backup.o
+
+# target to build an object file
+src/backup.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/todo.dir/build.make CMakeFiles/todo.dir/src/backup.cpp.o
+.PHONY : src/backup.cpp.o
+
+src/backup.i: src/backup.cpp.i
+.PHONY : src/backup.i
+
+# target to preprocess a source file
+src/backup.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/todo.dir/build.make CMakeFiles/todo.dir/src/backup.cpp.i
+.PHONY : src/backup.cpp.i
+
+src/backup.s: src/backup.cpp.s
+.PHONY : src/backup.s
+
+# target to generate assembly for a file
+src/backup.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/todo.dir/build.make CMakeFiles/todo.dir/src/backup.cpp.s
+.PHONY : src/backup.cpp.s
+
 src/db.o: src/db.cpp.o
 .PHONY : src/db.o
 
@@ -176,6 +200,30 @@ src/db.s: src/db.cpp.s
 src/db.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/todo.dir/build.make CMakeFiles/todo.dir/src/db.cpp.s
 .PHONY : src/db.cpp.s
+
+src/exporter.o: src/exporter.cpp.o
+.PHONY : src/exporter.o
+
+# target to build an object file
+src/exporter.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/todo.dir/build.make CMakeFiles/todo.dir/src/exporter.cpp.o
+.PHONY : src/exporter.cpp.o
+
+src/exporter.i: src/exporter.cpp.i
+.PHONY : src/exporter.i
+
+# target to preprocess a source file
+src/exporter.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/todo.dir/build.make CMakeFiles/todo.dir/src/exporter.cpp.i
+.PHONY : src/exporter.cpp.i
+
+src/exporter.s: src/exporter.cpp.s
+.PHONY : src/exporter.s
+
+# target to generate assembly for a file
+src/exporter.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/todo.dir/build.make CMakeFiles/todo.dir/src/exporter.cpp.s
+.PHONY : src/exporter.cpp.s
 
 src/http.o: src/http.cpp.o
 .PHONY : src/http.o
@@ -357,9 +405,15 @@ help:
 	@echo "... src/api.o"
 	@echo "... src/api.i"
 	@echo "... src/api.s"
+	@echo "... src/backup.o"
+	@echo "... src/backup.i"
+	@echo "... src/backup.s"
 	@echo "... src/db.o"
 	@echo "... src/db.i"
 	@echo "... src/db.s"
+	@echo "... src/exporter.o"
+	@echo "... src/exporter.i"
+	@echo "... src/exporter.s"
 	@echo "... src/http.o"
 	@echo "... src/http.i"
 	@echo "... src/http.s"

@@ -5,6 +5,8 @@
 #include "recurrence.hpp"
 #include "importer.hpp"
 #include "storage.hpp"
+#include "exporter.hpp"
+#include "backup.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -35,6 +37,14 @@ std::string now_local() {
                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                   tm.tm_hour, tm.tm_min, tm.tm_sec);
     return buf;
+}
+
+// 文件名友好的今日日期串（导出文件名用）
+static std::string today_str_for_file() {
+    std::string t = lunar::today_iso();
+    std::string r;
+    for (char c : t) if (c != '-') r += c;
+    return r.empty() ? "today" : r;
 }
 
 // 农历日期 "M-D" -> 中文描述
@@ -76,6 +86,8 @@ Json task_basic_json(Db& db, const Db::Row& r) {
     j["sortOrder"] = r.get_int("sort_order");
     j["status"] = r.get("status");
     j["completedAt"] = r.get("completed_at");
+    j["pomodoros"] = r.get_int("pomodoros");
+    j["deletedAt"] = r.get("deleted_at");
     std::string rr = r.get("repeat_rule");
     if (!rr.empty()) {
         try { j["repeatRule"] = Json::parse(rr); }
@@ -136,7 +148,8 @@ Json task_basic_json(Db& db, const Db::Row& r) {
 Json task_children_json(Db& db, long long parent_id) {
     Json arr = Json::array();
     for (auto& c : db.query(
-             "SELECT * FROM tasks WHERE parent_id=? ORDER BY sort_order, id",
+             "SELECT * FROM tasks WHERE parent_id=? AND deleted_at IS NULL "
+             "ORDER BY sort_order, id",
              {std::to_string(parent_id)})) {
         Json cj = task_basic_json(db, c);
         cj["children"] = task_children_json(db, c.get_int("id"));
@@ -302,6 +315,9 @@ void Api::register_routes(HttpServer& srv) {
     srv.on("GET", "/api/meta", [this](const HttpRequest& r) { return handle_meta(r); });
     srv.on("GET", "/api/tasks", [this](const HttpRequest& r) { return handle_tasks(r); });
     srv.on("POST", "/api/tasks", [this](const HttpRequest& r) { return handle_tasks(r); });
+    // 精确路由必须先于 /api/tasks/* 通配注册（匹配按注册顺序）
+    srv.on("POST", "/api/tasks/batch", [this](const HttpRequest& r) { return handle_batch(r); });
+    srv.on("POST", "/api/tasks/reorder", [this](const HttpRequest& r) { return handle_reorder(r); });
     srv.on("GET", "/api/tasks/*", [this](const HttpRequest& r) { return handle_task_detail(r, 0); });
     srv.on("PUT", "/api/tasks/*", [this](const HttpRequest& r) { return handle_task_update(r, 0); });
     srv.on("DELETE", "/api/tasks/*", [this](const HttpRequest& r) { return handle_task_delete(r, 0); });
@@ -329,6 +345,15 @@ void Api::register_routes(HttpServer& srv) {
     srv.on("GET", "/api/storage", [this](const HttpRequest& r) { return handle_storage(r); });
     srv.on("GET", "/api/storage/volumes", [this](const HttpRequest& r) { return handle_storage_volumes(r); });
     srv.on("POST", "/api/storage/move", [this](const HttpRequest& r) { return handle_storage_move(r); });
+    // ---- 新增能力路由 ----
+    srv.on("GET", "/api/trash", [this](const HttpRequest& r) { return handle_trash(r); });
+    srv.on("DELETE", "/api/trash", [this](const HttpRequest& r) { return handle_trash(r); });
+    srv.on("GET", "/api/stats", [this](const HttpRequest& r) { return handle_stats(r); });
+    srv.on("GET", "/api/export", [this](const HttpRequest& r) { return handle_export(r); });
+    srv.on("GET", "/api/backups", [this](const HttpRequest& r) { return handle_backups(r); });
+    srv.on("POST", "/api/backups", [this](const HttpRequest& r) { return handle_backups(r); });
+    srv.on("POST", "/api/holidays/auto", [this](const HttpRequest& r) { return handle_holidays_auto(r); });
+    srv.on("GET", "/api/digest", [this](const HttpRequest& r) { return handle_digest(r); });
 }
 
 // 从 /api/tasks/123 这类路径中取 id（由 handler 传 0 占位后解析）
@@ -439,12 +464,16 @@ HttpResponse Api::handle_tasks(const HttpRequest& req) {
         return HttpResponse::json(201, resp.dump());
     }
 
-    // GET 列表 + 筛选
-    std::string sql = "SELECT * FROM tasks WHERE 1=1";
+    // GET 列表 + 筛选（默认排除回收站；status=trash 查看回收站）
+    std::string sql;
     std::vector<std::string> params;
 
     std::string status = req.q("status", "all");
-    if (status != "all" && !status.empty())
+    if (status == "trash")
+        sql = "SELECT * FROM tasks WHERE deleted_at IS NOT NULL";
+    else
+        sql = "SELECT * FROM tasks WHERE deleted_at IS NULL";
+    if (status != "all" && !status.empty() && status != "trash")
         sql += " AND status=" + qstr(status);
 
     std::string project = req.q("project");
@@ -508,6 +537,10 @@ HttpResponse Api::handle_task_detail(const HttpRequest& req, long long) {
         return handle_task_complete(req, id);
     if (action == "reopen")
         return handle_task_reopen(req, id);
+    if (action == "restore")
+        return handle_task_restore(req, id);
+    if (action == "pomodoro")
+        return handle_pomodoro(req, id);
     if (action == "deps")
         return handle_deps(req, id);
     if (id <= 0) return HttpResponse::json(404, error_json("任务不存在").dump());
@@ -541,14 +574,340 @@ HttpResponse Api::handle_task_update(const HttpRequest& req, long long id) {
 HttpResponse Api::handle_task_delete(const HttpRequest& req, long long) {
     long long id = path_id(req, 2);
     if (id <= 0) return HttpResponse::json(404, error_json("任务不存在").dump());
-    db_.exec("DELETE FROM tasks WHERE id=" + std::to_string(id));
+    if (req.q("purge") == "1") {
+        db_.exec("DELETE FROM tasks WHERE id=" + std::to_string(id));
+    } else {
+        // 软删除 → 回收站（30 天后启动时自动清理）
+        db_.exec("UPDATE tasks SET deleted_at=" + qstr(now_local()) +
+                 ", updated_at=datetime('now','localtime') WHERE id=" + std::to_string(id));
+    }
     Json resp = Json::object();
     resp["ok"] = true;
+    resp["purged"] = req.q("purge") == "1";
+    return HttpResponse::json(200, resp.dump());
+}
+
+// 从回收站恢复
+HttpResponse Api::handle_task_restore(const HttpRequest& req, long long) {
+    long long id = path_id(req, 2);
+    if (id <= 0) return HttpResponse::json(404, error_json("任务不存在").dump());
+    if (db_.query_one("SELECT 1 FROM tasks WHERE id=?", {std::to_string(id)}).has_value() == false)
+        return HttpResponse::json(404, error_json("任务不存在").dump());
+    db_.exec("UPDATE tasks SET deleted_at=NULL, updated_at=datetime('now','localtime') "
+             "WHERE id=" + std::to_string(id));
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["task"] = task_full_json(db_, id);
+    return HttpResponse::json(200, resp.dump());
+}
+
+// 回收站列表 / 清空
+HttpResponse Api::handle_trash(const HttpRequest& req) {
+    if (req.method == "DELETE") {
+        db_.exec("DELETE FROM tasks WHERE deleted_at IS NOT NULL");
+        Json resp = Json::object();
+        resp["ok"] = true;
+        return HttpResponse::json(200, resp.dump());
+    }
+    Json arr = Json::array();
+    for (auto& r : db_.query(
+             "SELECT * FROM tasks WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC")) {
+        Json j = task_basic_json(db_, r);
+        arr.push_back(j);
+    }
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["count"] = static_cast<long long>(arr.size());
+    resp["tasks"] = arr;
+    return HttpResponse::json(200, resp.dump());
+}
+
+// 批量操作：{action, ids, projectId?, tag?, status?}
+HttpResponse Api::handle_batch(const HttpRequest& req) {
+    Json body;
+    try { body = Json::parse(req.body); }
+    catch (...) { return HttpResponse::json(400, error_json("JSON 解析失败").dump()); }
+    std::string action = body.get_str("action");
+    Json ids = body["ids"];
+    if (action.empty() || !ids.is_array() || ids.empty())
+        return HttpResponse::json(400, error_json("需要 action 与非空 ids 数组").dump());
+
+    std::string in_list;
+    for (auto& v : ids) in_list += std::to_string(v.as_int()) + ",";
+    if (!in_list.empty()) in_list.pop_back();
+    std::string where = "id IN (" + in_list + ")";
+
+    int affected = 0;
+    if (action == "complete") {
+        db_.exec("UPDATE tasks SET status='done', completed_at=" + qstr(now_local()) +
+                 ", updated_at=datetime('now','localtime') WHERE " + where +
+                 " AND deleted_at IS NULL");
+    } else if (action == "reopen") {
+        db_.exec("UPDATE tasks SET status='todo', completed_at=NULL, "
+                 "updated_at=datetime('now','localtime') WHERE " + where +
+                 " AND deleted_at IS NULL");
+    } else if (action == "delete") {
+        db_.exec("UPDATE tasks SET deleted_at=" + qstr(now_local()) +
+                 " WHERE " + where + " AND deleted_at IS NULL");
+    } else if (action == "purge") {
+        db_.exec("DELETE FROM tasks WHERE " + where);
+    } else if (action == "restore") {
+        db_.exec("UPDATE tasks SET deleted_at=NULL WHERE " + where);
+    } else if (action == "move") {
+        long long pid = body["projectId"].as_int_or(0);
+        db_.exec("UPDATE tasks SET project_id=" + (pid ? std::to_string(pid) : "NULL") +
+                 ", updated_at=datetime('now','localtime') WHERE " + where +
+                 " AND deleted_at IS NULL");
+    } else if (action == "status") {
+        std::string st = body.get_str("status");
+        if (st != "todo" && st != "doing" && st != "done" && st != "archived")
+            return HttpResponse::json(400, error_json("无效状态").dump());
+        db_.exec("UPDATE tasks SET status=" + qstr(st) +
+                 ", updated_at=datetime('now','localtime') WHERE " + where +
+                 " AND deleted_at IS NULL");
+    } else if (action == "tag") {
+        std::string name = body.get_str("tag");
+        if (name.empty())
+            return HttpResponse::json(400, error_json("缺少 tag").dump());
+        auto row = db_.query_one("SELECT id FROM tags WHERE name=?", {name});
+        long long tid;
+        if (row) tid = row->get_int("id");
+        else {
+            db_.exec("INSERT INTO tags(name) VALUES(" + qstr(name) + ")");
+            tid = db_.last_insert_rowid();
+        }
+        bool remove = body.get_bool("remove");
+        for (auto& v : ids) {
+            long long id = v.as_int();
+            if (remove)
+                db_.exec("DELETE FROM task_tags WHERE task_id=" + std::to_string(id) +
+                         " AND tag_id=" + std::to_string(tid));
+            else
+                db_.exec("INSERT OR IGNORE INTO task_tags(task_id,tag_id) VALUES(" +
+                         std::to_string(id) + "," + std::to_string(tid) + ")");
+        }
+    } else {
+        return HttpResponse::json(400, error_json("未知操作: " + action).dump());
+    }
+    affected = db_.changes();
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["affected"] = affected;
+    return HttpResponse::json(200, resp.dump());
+}
+
+// 手动排序：{ids: [按新顺序]}
+HttpResponse Api::handle_reorder(const HttpRequest& req) {
+    Json body;
+    try { body = Json::parse(req.body); }
+    catch (...) { return HttpResponse::json(400, error_json("JSON 解析失败").dump()); }
+    Json ids = body["ids"];
+    if (!ids.is_array() || ids.empty())
+        return HttpResponse::json(400, error_json("缺少 ids 数组").dump());
+    int i = 0;
+    for (auto& v : ids) {
+        db_.exec("UPDATE tasks SET sort_order=" + std::to_string(i) +
+                 " WHERE id=" + std::to_string(v.as_int()));
+        ++i;
+    }
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["count"] = i;
+    return HttpResponse::json(200, resp.dump());
+}
+
+// 番茄钟：完成一个番茄，计数 +1
+HttpResponse Api::handle_pomodoro(const HttpRequest& req, long long) {
+    long long id = path_id(req, 2);
+    if (id <= 0) return HttpResponse::json(404, error_json("任务不存在").dump());
+    if (db_.query_one("SELECT 1 FROM tasks WHERE id=?", {std::to_string(id)}).has_value() == false)
+        return HttpResponse::json(404, error_json("任务不存在").dump());
+    db_.exec("UPDATE tasks SET pomodoros=pomodoros+1 WHERE id=" + std::to_string(id));
+    auto r = db_.query_one("SELECT pomodoros FROM tasks WHERE id=?", {std::to_string(id)});
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["pomodoros"] = r ? r->get_int("pomodoros") : 0;
+    return HttpResponse::json(200, resp.dump());
+}
+
+// 统计仪表盘数据
+HttpResponse Api::handle_stats(const HttpRequest& req) {
+    std::string today = lunar::today_iso();
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["today"] = today;
+
+    auto count = [&](const std::string& cond) -> long long {
+        auto r = db_.query_one("SELECT COUNT(*) c FROM tasks WHERE deleted_at IS NULL AND " + cond);
+        return r ? r->get_int("c") : 0;
+    };
+    Json totals = Json::object();
+    totals["todo"] = count("status='todo'");
+    totals["doing"] = count("status='doing'");
+    totals["done"] = count("status='done'");
+    totals["archived"] = count("status='archived'");
+    totals["overdue"] = count("status!='done' AND due_date IS NOT NULL AND due_date<'" + today + "'");
+    totals["dueToday"] = count("status!='done' AND due_date='" + today + "'");
+    long long all = totals["todo"].as_int() + totals["doing"].as_int() +
+                    totals["done"].as_int() + totals["archived"].as_int();
+    totals["all"] = all;
+    resp["totals"] = totals;
+
+    // 优先级分布（未完成）
+    Json prio = Json::array();
+    for (auto& r : db_.query(
+             "SELECT priority, COUNT(*) c FROM tasks WHERE deleted_at IS NULL AND status!='done' "
+             "GROUP BY priority ORDER BY priority DESC")) {
+        Json p = Json::object();
+        p["priority"] = r.get_int("priority");
+        p["count"] = r.get_int("c");
+        prio.push_back(p);
+    }
+    resp["priorityDist"] = prio;
+
+    // 最近 14 天完成趋势
+    Json trend = Json::array();
+    for (int i = 13; i >= 0; --i) {
+        std::string d = lunar::add_days_iso(today, -i);
+        auto r = db_.query_one(
+            "SELECT COUNT(*) c FROM tasks WHERE deleted_at IS NULL AND status='done' "
+            "AND completed_at LIKE '" + d + "%'");
+        Json t = Json::object();
+        t["date"] = d;
+        t["count"] = r ? r->get_int("c") : 0;
+        trend.push_back(t);
+    }
+    resp["trend"] = trend;
+
+    // 连续打卡天数（连续每天至少完成 1 个）
+    int streak = 0;
+    for (int i = 0; i < 3650; ++i) {
+        std::string d = lunar::add_days_iso(today, -i);
+        auto r = db_.query_one(
+            "SELECT COUNT(*) c FROM tasks WHERE deleted_at IS NULL AND status='done' "
+            "AND completed_at LIKE '" + d + "%'");
+        long long c = r ? r->get_int("c") : 0;
+        if (c > 0) ++streak;
+        else if (i > 0) break;   // 今天没完成不打断连续记录
+    }
+    resp["streak"] = streak;
+
+    // 项目进度
+    Json projects = Json::array();
+    for (auto& p : db_.query(
+             "SELECT p.id,p.name,p.color,"
+             "SUM(CASE WHEN t.status!='done' THEN 1 ELSE 0 END) open,"
+             "SUM(CASE WHEN t.status='done' THEN 1 ELSE 0 END) done "
+             "FROM projects p LEFT JOIN tasks t ON t.project_id=p.id AND t.deleted_at IS NULL "
+             "GROUP BY p.id ORDER BY open DESC")) {
+        Json pj = Json::object();
+        pj["id"] = p.get_int("id");
+        pj["name"] = p.get("name");
+        pj["color"] = p.get("color", "#4A90D9");
+        pj["open"] = p.get_int("open");
+        pj["done"] = p.get_int("done");
+        projects.push_back(pj);
+    }
+    resp["projects"] = projects;
+
+    // 番茄钟总计
+    auto pomo = db_.query_one(
+        "SELECT COALESCE(SUM(pomodoros),0) s FROM tasks WHERE deleted_at IS NULL");
+    resp["pomodoros"] = pomo ? pomo->get_int("s") : 0;
+    return HttpResponse::json(200, resp.dump());
+}
+
+// 导出下载：?format=todotxt|json|csv
+HttpResponse Api::handle_export(const HttpRequest& req) {
+    std::string format = req.q("format", "todotxt");
+    if (format != "todotxt" && format != "json" && format != "csv")
+        return HttpResponse::json(400, error_json("format 应为 todotxt|json|csv").dump());
+    std::string data = exporter::export_tasks(db_, format);
+    HttpResponse r;
+    r.status = 200;
+    if (format == "json") r.content_type = "application/json; charset=utf-8";
+    else if (format == "csv") r.content_type = "text/csv; charset=utf-8";
+    else r.content_type = "text/plain; charset=utf-8";
+    r.body = std::move(data);
+    r.headers["Content-Disposition"] =
+        "attachment; filename=\"todo-export-" + today_str_for_file() + "." + format + "\"";
+    return r;
+}
+
+// 备份：GET 列表 / POST 立即备份
+HttpResponse Api::handle_backups(const HttpRequest& req) {
+    if (req.method == "POST") {
+        std::string err = backup::backup_now(db_);
+        if (!err.empty()) return HttpResponse::json(500, error_json(err).dump());
+        Json resp = Json::object();
+        resp["ok"] = true;
+        resp["backupsDir"] = "（数据库所在目录）/backups";
+        return HttpResponse::json(200, resp.dump());
+    }
+    Json arr = Json::array();
+    for (auto& b : backup::list_backups(db_)) {
+        Json j = Json::object();
+        j["name"] = b.name;
+        j["path"] = b.path;
+        j["sizeBytes"] = b.sizeBytes;
+        arr.push_back(j);
+    }
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["count"] = static_cast<long long>(arr.size());
+    resp["backups"] = arr;
+    return HttpResponse::json(200, resp.dump());
+}
+
+// 生成某年法定节假日（含农历/节气推导）；?year= 缺省今年
+HttpResponse Api::handle_holidays_auto(const HttpRequest& req) {
+    int year = std::atoi(req.q("year", "0").c_str());
+    if (year == 0) {
+        int y = 0, m = 0, d = 0;
+        std::sscanf(lunar::today_iso().c_str(), "%d-%d-%d", &y, &m, &d);
+        year = y;
+    }
+    if (year < 1901 || year > 2099)
+        return HttpResponse::json(400, error_json("年份应在 1901-2099").dump());
+
+    int added = 0;
+    Json days = Json::array();
+    // 遍历全年，statutory_holiday 命中即入库
+    for (int m = 1; m <= 12; ++m) {
+        int dim = 31;
+        if (m == 4 || m == 6 || m == 9 || m == 11) dim = 30;
+        if (m == 2) dim = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) ? 29 : 28;
+        for (int d = 1; d <= dim; ++d) {
+            std::string name = lunar::statutory_holiday(year, m, d);
+            if (name.empty()) continue;
+            char iso[16];
+            std::snprintf(iso, sizeof iso, "%04d-%02d-%02d", year, m, d);
+            db_.exec("INSERT OR IGNORE INTO holidays(date) VALUES(" + qstr(iso) + ")");
+            ++added;
+            Json j = Json::object();
+            j["date"] = iso;
+            j["name"] = name;
+            days.push_back(j);
+        }
+    }
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["year"] = year;
+    resp["added"] = added;
+    resp["holidays"] = days;
+    return HttpResponse::json(200, resp.dump());
+}
+
+// 每日摘要
+HttpResponse Api::handle_digest(const HttpRequest& req) {
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["digest"] = exporter::daily_digest(db_);
     return HttpResponse::json(200, resp.dump());
 }
 
 HttpResponse Api::handle_task_complete(const HttpRequest& req, long long id) {
-    auto row = db_.query_one("SELECT * FROM tasks WHERE id=?", {std::to_string(id)});
+    auto row = db_.query_one("SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL", {std::to_string(id)});
     if (!row) return HttpResponse::json(404, error_json("任务不存在").dump());
     db_.exec("UPDATE tasks SET status='done', completed_at=" + qstr(now_local()) +
              " WHERE id=" + std::to_string(id));
@@ -644,8 +1003,8 @@ HttpResponse Api::handle_deps(const HttpRequest& req, long long id) {
 
 HttpResponse Api::handle_tree(const HttpRequest& req) {
     std::string status = req.q("status", "all");
-    std::string sql = "SELECT * FROM tasks";
-    if (status != "all") sql += " WHERE status=" + qstr(status);
+    std::string sql = "SELECT * FROM tasks WHERE deleted_at IS NULL";
+    if (status != "all") sql += " AND status=" + qstr(status);
     sql += " ORDER BY priority DESC, COALESCE(due_date,'9999-12-31'), sort_order, id";
     auto rows = db_.query(sql);
 
@@ -683,7 +1042,7 @@ HttpResponse Api::handle_today(const HttpRequest& req) {
 
     auto query_day = [&](const std::string& cond) {
         Json arr = Json::array();
-        std::string sql = "SELECT * FROM tasks WHERE status!='done' AND " + cond +
+        std::string sql = "SELECT * FROM tasks WHERE deleted_at IS NULL AND status!='done' AND " + cond +
                           " ORDER BY priority DESC, COALESCE(due_date,'9999-12-31'), sort_order, id";
         for (auto& r : db_.query(sql)) arr.push_back(task_basic_json(db_, r));
         return arr;
@@ -696,7 +1055,7 @@ HttpResponse Api::handle_today(const HttpRequest& req) {
     // 今日已完成
     Json done = Json::array();
     for (auto& r : db_.query(
-             "SELECT * FROM tasks WHERE status='done' AND completed_at LIKE '" + today + "%' "
+             "SELECT * FROM tasks WHERE deleted_at IS NULL AND status='done' AND completed_at LIKE '" + today + "%' "
              "ORDER BY completed_at DESC")) {
         done.push_back(task_basic_json(db_, r));
     }
@@ -705,6 +1064,12 @@ HttpResponse Api::handle_today(const HttpRequest& req) {
 }
 
 HttpResponse Api::handle_calendar(const HttpRequest& req) {
+    // 支持 start/end 任意区间（周视图）；缺省按 year/month 整月
+    std::string range_first = req.q("start");
+    std::string range_last = req.q("end");
+    bool has_range = !range_first.empty() && !range_last.empty() &&
+                     range_first <= range_last;
+
     int year = std::atoi(req.q("year", "0").c_str());
     int month = std::atoi(req.q("month", "0").c_str());
     if (year == 0 || month < 1 || month > 12) {
@@ -721,12 +1086,19 @@ HttpResponse Api::handle_calendar(const HttpRequest& req) {
               std::snprintf(b, sizeof b, "%04d-%02d-01", year, month + 1);
               return std::string(b);
           })();
-    std::string last = lunar::add_days_iso(next_first, -1);
+    std::string first_iso, last;
+    if (has_range) {
+        first_iso = range_first;
+        last = range_last;
+    } else {
+        first_iso = first;
+        last = lunar::add_days_iso(next_first, -1);
+    }
 
     HolidayChecker hc(db_);
     std::map<std::string, Json> day_map;
-    std::string d = first;
-    for (int guard = 0; guard < 31 && d <= last; ++guard, d = lunar::add_days_iso(d, 1)) {
+    std::string d = first_iso;
+    for (int guard = 0; guard < 62 && d <= last; ++guard, d = lunar::add_days_iso(d, 1)) {
         Json dj = Json::object();
         dj["date"] = d;
         int y2 = 0, m2 = 0, dd2 = 0;
@@ -735,15 +1107,17 @@ HttpResponse Api::handle_calendar(const HttpRequest& req) {
         dj["lunar"] = lt.month == 0 ? "" : (lunar::month_name(lt.month, lt.isLeap) +
                                             lunar::day_name(lt.day));
         dj["isHoliday"] = hc(d);
+        dj["term"] = lunar::solar_term(y2, m2, dd2);
+        dj["holidayName"] = lunar::statutory_holiday(y2, m2, dd2);
         dj["tasks"] = Json::array();
         day_map[d] = dj;
     }
 
     // 当天到期/开始的任务
     for (auto& r : db_.query(
-             "SELECT * FROM tasks WHERE status!='done' AND "
-             "(due_date BETWEEN '" + std::string(first) + "' AND '" + last + "' OR "
-             " start_date BETWEEN '" + std::string(first) + "' AND '" + last + "')")) {
+             "SELECT * FROM tasks WHERE deleted_at IS NULL AND status!='done' AND "
+             "(due_date BETWEEN '" + first_iso + "' AND '" + last + "' OR "
+             " start_date BETWEEN '" + first_iso + "' AND '" + last + "')")) {
         std::string due = r.get("due_date");
         if (day_map.count(due)) day_map[due]["tasks"].push_back(
             [&]() {
@@ -763,10 +1137,10 @@ HttpResponse Api::handle_calendar(const HttpRequest& req) {
     }
 
     // 重复任务实例
-    for (auto& r : db_.query("SELECT * FROM tasks WHERE status!='done' AND repeat_rule!=''")) {
+    for (auto& r : db_.query("SELECT * FROM tasks WHERE deleted_at IS NULL AND status!='done' AND repeat_rule!=''")) {
         RepeatRule rule = RepeatRule::from_json_str(r.get("repeat_rule"));
         if (!rule.enabled()) continue;
-        auto occ = recurrence::occurrences_in_range(rule, first, last, hc);
+        auto occ = recurrence::occurrences_in_range(rule, first_iso, last, hc);
         for (auto& o : occ) {
             if (day_map.count(o)) day_map[o]["tasks"].push_back(
                 [&]() {
@@ -782,14 +1156,14 @@ HttpResponse Api::handle_calendar(const HttpRequest& req) {
 
     // 农历提醒任务：把农历日期映射到本月
     for (auto& r : db_.query(
-             "SELECT * FROM tasks WHERE status!='done' AND lunar_remind=1 AND lunar_date!=''")) {
+             "SELECT * FROM tasks WHERE deleted_at IS NULL AND status!='done' AND lunar_remind=1 AND lunar_date!=''")) {
         std::string ld = r.get("lunar_date");
         int lm = 0, lday = 0;
         if (std::sscanf(ld.c_str(), "%d-%d", &lm, &lday) != 2) continue;
         // 尝试本年与本年后一年
         for (int try_y = year - 1; try_y <= year + 1; ++try_y) {
             SolarDate s = lunar::lunar_to_solar(try_y, lm, lday, false);
-            if (s.year != 0 && s.iso >= first && s.iso <= last && day_map.count(s.iso)) {
+            if (s.year != 0 && s.iso >= first_iso && s.iso <= last && day_map.count(s.iso)) {
                 day_map[s.iso]["tasks"].push_back(
                     [&]() {
                         Json e = Json::object();
@@ -805,8 +1179,8 @@ HttpResponse Api::handle_calendar(const HttpRequest& req) {
     }
 
     Json days = Json::array();
-    d = first;
-    for (int guard = 0; guard < 31 && d <= last; ++guard, d = lunar::add_days_iso(d, 1))
+    d = first_iso;
+    for (int guard = 0; guard < 62 && d <= last; ++guard, d = lunar::add_days_iso(d, 1))
         days.push_back(day_map[d]);
 
     Json resp = Json::object();
@@ -818,7 +1192,7 @@ HttpResponse Api::handle_calendar(const HttpRequest& req) {
 }
 
 HttpResponse Api::handle_kanban(const HttpRequest& req) {
-    std::string sql = "SELECT * FROM tasks WHERE status IN ('todo','doing','done')";
+    std::string sql = "SELECT * FROM tasks WHERE deleted_at IS NULL AND status IN ('todo','doing','done')";
     std::string tag = req.q("tag");
     if (!tag.empty())
         sql += " AND EXISTS(SELECT 1 FROM task_tags tt JOIN tags t ON t.id=tt.tag_id "
@@ -897,13 +1271,13 @@ HttpResponse Api::handle_projects(const HttpRequest& req) {
         pj["parentId"] = p.get_int("parent_id");
         pj["isFolder"] = p.get_int("is_folder") != 0;
         auto cnt = db_.query_one(
-            "SELECT COUNT(*) c FROM tasks WHERE project_id=? AND status!='done'",
+            "SELECT COUNT(*) c FROM tasks WHERE deleted_at IS NULL AND project_id=? AND status!='done'",
             {std::to_string(p.get_int("id"))});
         pj["taskCount"] = cnt ? cnt->get_int("c") : 0;
         arr.push_back(pj);
     }
     // 未分类
-    auto unc = db_.query_one("SELECT COUNT(*) c FROM tasks WHERE project_id IS NULL AND status!='done'");
+    auto unc = db_.query_one("SELECT COUNT(*) c FROM tasks WHERE deleted_at IS NULL AND project_id IS NULL AND status!='done'");
     Json inbox = Json::object();
     inbox["id"] = 0;
     inbox["name"] = "未分类";
@@ -948,7 +1322,7 @@ HttpResponse Api::handle_tags(const HttpRequest& req) {
     for (auto& t : db_.query(
              "SELECT t.id,t.name,t.color,COUNT(tt.task_id) c FROM tags t "
              "LEFT JOIN task_tags tt ON tt.tag_id=t.id "
-             "LEFT JOIN tasks ts ON ts.id=tt.task_id AND ts.status!='done' "
+             "LEFT JOIN tasks ts ON ts.id=tt.task_id AND ts.status!='done' AND ts.deleted_at IS NULL "
              "GROUP BY t.id ORDER BY c DESC, t.name")) {
         Json tj = Json::object();
         tj["id"] = t.get_int("id");
@@ -1067,8 +1441,8 @@ HttpResponse Api::handle_holidays(const HttpRequest& req) {
 HttpResponse Api::handle_search(const HttpRequest& req) {
     std::string q = req.q("q");
     if (q.empty()) return HttpResponse::json(200, "{\"ok\":true,\"tasks\":[]}");
-    std::string sql = "SELECT * FROM tasks WHERE title LIKE " + qstr("%" + q + "%") +
-                      " OR notes LIKE " + qstr("%" + q + "%") +
+    std::string sql = "SELECT * FROM tasks WHERE deleted_at IS NULL AND (title LIKE " + qstr("%" + q + "%") +
+                      " OR notes LIKE " + qstr("%" + q + "%") + ")" +
                       " ORDER BY priority DESC, COALESCE(due_date,'9999-12-31') LIMIT 50";
     Json arr = Json::array();
     for (auto& r : db_.query(sql)) arr.push_back(task_basic_json(db_, r));

@@ -21,9 +21,19 @@ private:
     HttpResponse handle_task_detail(const HttpRequest& req, long long id);
     HttpResponse handle_task_update(const HttpRequest& req, long long id);
     HttpResponse handle_task_delete(const HttpRequest& req, long long id);
+    HttpResponse handle_task_restore(const HttpRequest& req, long long id);   // POST 恢复
     HttpResponse handle_task_complete(const HttpRequest& req, long long id);
     HttpResponse handle_task_reopen(const HttpRequest& req, long long id);
     HttpResponse handle_deps(const HttpRequest& req, long long id);
+    HttpResponse handle_trash(const HttpRequest& req);          // GET 回收站 / DELETE 清空
+    HttpResponse handle_batch(const HttpRequest& req);          // POST 批量操作
+    HttpResponse handle_reorder(const HttpRequest& req);        // POST 手动排序
+    HttpResponse handle_pomodoro(const HttpRequest& req, long long id); // POST 番茄钟+1
+    HttpResponse handle_stats(const HttpRequest& req);          // GET 统计仪表盘
+    HttpResponse handle_export(const HttpRequest& req);         // GET 导出下载
+    HttpResponse handle_backups(const HttpRequest& req);        // GET 列表 / POST 立即备份
+    HttpResponse handle_holidays_auto(const HttpRequest& req);  // POST 生成某年法定节假日
+    HttpResponse handle_digest(const HttpRequest& req);         // GET 每日摘要
     HttpResponse handle_tree(const HttpRequest& req);
     HttpResponse handle_today(const HttpRequest& req);
     HttpResponse handle_calendar(const HttpRequest& req);

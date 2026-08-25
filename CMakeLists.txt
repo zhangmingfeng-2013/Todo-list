@@ -19,6 +19,8 @@ add_executable(todo
   src/http.cpp
   src/api.cpp
   src/storage.cpp
+  src/exporter.cpp
+  src/backup.cpp
   vendor/sqlite3.c
 )
 

@@ -4,6 +4,7 @@
 #include <sqlite3.h>
 #include <stdexcept>
 #include <cstring>
+#include <set>
 
 // ---- Schema ----
 const char* kSchemaSql = R"SQL(
@@ -45,6 +46,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     sort_order INTEGER DEFAULT 0,
     status TEXT DEFAULT 'todo',          -- todo|doing|done|archived
     completed_at TEXT,
+    pomodoros INTEGER DEFAULT 0,         -- 已完成番茄钟数
+    deleted_at TEXT,                     -- 软删除时间（回收站），NULL=正常
     repeat_rule TEXT DEFAULT '',         -- JSON: {freq,interval,weekdays,skipWeekends,skipHolidays,endDate}
     created_at TEXT DEFAULT (datetime('now','localtime')),
     updated_at TEXT DEFAULT (datetime('now','localtime'))
@@ -85,6 +88,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_parent  ON tasks(parent_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_due     ON tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_tasks_start   ON tasks(start_date);
 CREATE INDEX IF NOT EXISTS idx_tasks_status  ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(deleted_at);
 CREATE INDEX IF NOT EXISTS idx_task_tags_tag ON task_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_task_deps_dep ON task_dependencies(depends_on);
 )SQL";
@@ -230,6 +234,22 @@ void Db::rollback() {
     exec("ROLLBACK");
 }
 
+// 旧库迁移：为已存在的 tasks 表补齐新增列（必须在 kSchemaSql 建索引之前执行，
+// 否则 idx_tasks_deleted 会因旧库缺列而失败）
+static void migrate_schema(Db& db) {
+    std::set<std::string> cols;
+    for (auto& r : db.query("PRAGMA table_info(tasks)"))
+        cols.insert(r.get("name"));
+    if (!cols.count("pomodoros"))
+        db.exec("ALTER TABLE tasks ADD COLUMN pomodoros INTEGER DEFAULT 0");
+    if (!cols.count("deleted_at"))
+        db.exec("ALTER TABLE tasks ADD COLUMN deleted_at TEXT");
+}
+
 void init_schema(Db& db) {
+    // 已有旧库 → 先迁移列，再跑完整 schema（含新索引）
+    if (!db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'")
+             .empty())
+        migrate_schema(db);
     db.exec(kSchemaSql);
 }
