@@ -34,6 +34,10 @@ private:
     HttpResponse handle_backups(const HttpRequest& req);        // GET 列表 / POST 立即备份
     HttpResponse handle_holidays_auto(const HttpRequest& req);  // POST 生成某年法定节假日
     HttpResponse handle_digest(const HttpRequest& req);         // GET 每日摘要
+    HttpResponse handle_quick_add(const HttpRequest& req);      // POST 自然语言快速录入（?preview=1 仅解析）
+    HttpResponse handle_templates(const HttpRequest& req);      // GET 模板列表 / POST 保存模板
+    HttpResponse handle_template_detail(const HttpRequest& req);// DELETE 删除模板 / POST 实例化模板
+    HttpResponse handle_heatmap(const HttpRequest& req);        // GET 年度完成热力图数据
     HttpResponse handle_tree(const HttpRequest& req);
     HttpResponse handle_today(const HttpRequest& req);
     HttpResponse handle_calendar(const HttpRequest& req);
@@ -45,4 +49,9 @@ private:
     HttpResponse handle_holidays(const HttpRequest& req);
     HttpResponse handle_search(const HttpRequest& req);
     HttpResponse handle_meta(const HttpRequest& req);
+    // ---- 批次 B/C 新增 ----
+    HttpResponse handle_undo(const HttpRequest& req);        // POST 撤销最近一次写操作 / GET 查询可撤销项
+    HttpResponse handle_repeat_preview(const HttpRequest& req); // POST 重复规则预览（未来 N 次）
+    HttpResponse handle_day(const HttpRequest& req);         // GET 时间块日视图数据
+    HttpResponse handle_sync(const HttpRequest& req);        // POST 多端同步（合并导入快照）
 };

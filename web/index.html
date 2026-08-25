@@ -20,6 +20,7 @@
   <symbol id="icon-gantt" viewBox="0 0 16 16"><path d="M2 5h6M2 9h10M2 13h4"/></symbol>
   <symbol id="icon-trash" viewBox="0 0 16 16"><path d="M3 5h10M5 5V3h6v2M6 8v5M10 8v5"/></symbol>
   <symbol id="icon-pomodoro" viewBox="0 0 16 16"><circle cx="8" cy="9" r="5"/><path d="M8 4V2M6 4L5 2M10 4l1-2"/></symbol>
+  <symbol id="icon-bolt" viewBox="0 0 16 16"><path d="M9 1L4 8h3.2L6 15l6-8H8.8z"/></symbol>
   <symbol id="icon-cmd" viewBox="0 0 16 16"><path d="M9 2L5 9h4l-1 5 5-7H9z"/></symbol>
   <symbol id="icon-export" viewBox="0 0 16 16"><path d="M8 2v8M5 6l3-3 3 3M3 11h10"/></symbol>
   <symbol id="icon-theme" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3"/><path d="M8 2v2M8 12v2M2 8h2M12 8h2M4 4l1.5 1.5M11 11l1.5 1.5M4 12l1.5-1.5M11 5l1.5-1.5"/></symbol>
@@ -28,6 +29,10 @@
   <symbol id="icon-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="M13 13l-3-3"/></symbol>
   <symbol id="icon-check" viewBox="0 0 16 16"><path d="M3 8l3 3 7-7"/></symbol>
   <symbol id="icon-close" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+  <symbol id="icon-day" viewBox="0 0 16 16"><path d="M2 3.5h12M2 8h12M2 12.5h12"/><circle cx="6" cy="8" r="1.8"/><circle cx="11" cy="12.5" r="1.8"/></symbol>
+  <symbol id="icon-undo" viewBox="0 0 16 16"><path d="M3 7h7a3.5 3.5 0 010 7H6"/><path d="M6 4L3 7l3 3"/></symbol>
+  <symbol id="icon-focus" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="1.5"/></symbol>
+  <symbol id="icon-sync" viewBox="0 0 16 16"><path d="M13 6a5 5 0 00-9-1M3 10a5 5 0 009 1"/><path d="M13 2v4h-4M3 14v-4h4"/></symbol>
 </svg>
 
 <div id="app">
@@ -53,6 +58,9 @@
       </button>
       <button data-view="calendar" class="nav-item" title="日历视图">
         <span class="nav-ico"><svg><use href="#icon-calendar"/></svg></span>日历
+      </button>
+      <button data-view="day" class="nav-item" title="时间块日视图（D）">
+        <span class="nav-ico"><svg><use href="#icon-day"/></svg></span>日视图
       </button>
       <button data-view="kanban" class="nav-item" title="看板视图">
         <span class="nav-ico"><svg><use href="#icon-kanban"/></svg></span>看板
@@ -95,6 +103,10 @@
   <!-- ============ 主区域 ============ -->
   <main id="main">
     <header id="topbar">
+      <div class="quick-wrap" title="自然语言快速录入：明天下午3点 写周报 #工作 !高 /项目名">
+        <span class="quick-ico"><svg><use href="#icon-bolt"/></svg></span>
+        <input id="quick-input" type="text" placeholder="快速录入：明天下午3点 写周报 #工作 !高" autocomplete="off">
+      </div>
       <div class="search-wrap">
         <span class="search-ico"><svg><use href="#icon-search"/></svg></span>
         <input id="search-input" type="text" placeholder="搜索任务（标题 / 备注）…" autocomplete="off">

@@ -78,9 +78,26 @@ CREATE TABLE IF NOT EXISTS holidays (
     date TEXT PRIMARY KEY                 -- YYYY-MM-DD 法定/自定义节假日
 );
 
+CREATE TABLE IF NOT EXISTS templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    body TEXT NOT NULL,                   -- JSON 任务字段（与 POST /api/tasks 一致，可含 dueOffsetDays/startOffsetDays）
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS undo_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,               -- create|update|delete|purge|complete|reopen|restore
+    task_id INTEGER,                    -- 被操作的任务 id（create 时为 0）
+    after_id INTEGER DEFAULT 0,         -- 操作产生的新任务 id（create / complete 下一实例）
+    label TEXT DEFAULT '',              -- 任务标题（用于提示）
+    payload TEXT NOT NULL,              -- JSON：操作前的完整快照（含标签/依赖）
+    created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
@@ -91,6 +108,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status  ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(deleted_at);
 CREATE INDEX IF NOT EXISTS idx_task_tags_tag ON task_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_task_deps_dep ON task_dependencies(depends_on);
+CREATE INDEX IF NOT EXISTS idx_undo_log_id ON undo_log(id);
 )SQL";
 
 std::recursive_mutex& Db::mutex() {

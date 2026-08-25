@@ -112,7 +112,9 @@ const S = {
   searchTimer: null,
   batchMode: false,      // 批量选择模式
   batchSel: new Set(),   // 已勾选任务 id
-  dragTaskId: null       // 拖拽中的任务 id
+  dragTaskId: null,      // 拖拽中的任务 id
+  heatYear: 0,           // 热力图当前年份（0=今年）
+  dayDate: ''            // 日视图当前日期（空=今天）
 };
 
 /* ---------------- 初始化 ---------------- */
@@ -232,6 +234,7 @@ async function switchView(v) {
     if (v === 'projects')  await renderProjects(content);
     if (v === 'tags')      await renderTags(content);
     if (v === 'calendar')  await renderCalendar(content);
+    if (v === 'day')       await renderDay(content);
     if (v === 'kanban')    await renderKanban(content);
     if (v === 'filters')   await renderFilters(content);
     if (v === 'stats')     await renderStats(content);
@@ -297,6 +300,7 @@ function taskRowHTML(t, depth) {
     '<button class="t-btn" data-act="addsub" data-id="' + t.id + '" title="添加子任务">' + svgIcon('plus', 12) + '</button>' +
     '<button class="t-btn" data-act="edit" data-id="' + t.id + '" title="编辑">✎</button>' +
     '<button class="t-btn" data-act="pomo" data-id="' + t.id + '" title="用番茄钟专注此任务">' + svgIcon('pomodoro', 12) + '</button>' +
+    '<button class="t-btn" data-act="focus" data-id="' + t.id + '" title="专注模式（全屏番茄钟）">' + svgIcon('focus', 12) + '</button>' +
     '<button class="t-btn danger" data-act="del" data-id="' + t.id + '" title="删除">🗑</button>' +
     '</div>';
 
@@ -841,6 +845,61 @@ async function renderStats(content) {
     card(data.pomodoros || 0, svgIcon('pomodoro', 14) + ' 番茄钟总计', 'c-red');
   content.appendChild(cards);
 
+  // 年度完成热力图（GitHub 风格格子图）
+  try {
+    const hmYear = S.heatYear || parseInt(S.today.slice(0, 4), 10);
+    const hm = await apiGet('/api/heatmap?year=' + hmYear);
+    const map = {};
+    (hm.days || []).forEach(d => { map[d.date] = d.count; });
+    const sec = document.createElement('div');
+    sec.className = 'stat-sec';
+    sec.innerHTML = '<h3 style="display:flex;align-items:center;gap:10px">' + hmYear + ' 年完成热力图' +
+      '<span style="margin-left:auto;display:flex;gap:6px">' +
+      '<button class="btn btn-sm" data-act="hm-prev">‹ ' + (hmYear - 1) + '</button>' +
+      '<button class="btn btn-sm" data-act="hm-next">' + (hmYear + 1) + ' ›</button></span></h3>';
+    const box = document.createElement('div');
+    box.className = 'stat-box';
+    // 网格：列=周（周一开头），行=周一..周日
+    const jan1 = new Date(hmYear, 0, 1);
+    const off = (jan1.getDay() + 6) % 7;                 // 1月1日前面补的空白天数
+    const start = new Date(hmYear, 0, 1 - off);          // 本年第一个周一
+    const colW = 13, rowH = 13;
+    const weeks = 53;
+    const W = weeks * colW + 4, H = 7 * rowH + 18;
+    const todayTs = S.today ? new Date(S.today + 'T23:59:59').getTime() : Date.now();
+    let svg = '<svg class="heatmap-svg" viewBox="0 0 ' + W + ' ' + H + '" width="100%" style="max-width:' + W + 'px">';
+    let lastMonth = -1;
+    for (let wk = 0; wk < weeks; ++wk) {
+      for (let d = 0; d < 7; ++d) {
+        const cur = new Date(start);
+        cur.setDate(start.getDate() + wk * 7 + d);
+        if (cur.getFullYear() !== hmYear) continue;
+        if (cur.getTime() > todayTs) continue;           // 未来日期不渲染
+        const iso = cur.getFullYear() + '-' + String(cur.getMonth() + 1).padStart(2, '0') +
+          '-' + String(cur.getDate()).padStart(2, '0');
+        const c = map[iso] || 0;
+        const lvl = c === 0 ? 0 : c <= 2 ? 1 : c <= 4 ? 2 : c <= 7 ? 3 : 4;
+        svg += '<rect class="hm-cell hm-l' + lvl + '" x="' + (wk * colW) + '" y="' + (d * rowH + 16) +
+          '" width="11" height="11" rx="2"><title>' + iso + '：完成 ' + c + ' 项</title></rect>';
+      }
+      const monday = new Date(start);
+      monday.setDate(start.getDate() + wk * 7);
+      if (monday.getFullYear() === hmYear && monday.getMonth() !== lastMonth) {
+        lastMonth = monday.getMonth();
+        svg += '<text class="hm-month" x="' + (wk * colW) + '" y="11">' + (lastMonth + 1) + '月</text>';
+      }
+    }
+    svg += '</svg>';
+    const lg = '<div class="hm-legend">少' +
+      '<span class="lg-cell hm-l0"></span><span class="lg-cell hm-l1"></span>' +
+      '<span class="lg-cell hm-l2"></span><span class="lg-cell hm-l3"></span>' +
+      '<span class="lg-cell hm-l4"></span>多</div>' +
+      '<div class="hm-total">全年完成 <b>' + (hm.total || 0) + '</b> 项 · 单日最高 <b>' + (hm.max || 0) + '</b> 项</div>';
+    box.innerHTML = svg + lg;
+    sec.appendChild(box);
+    content.appendChild(sec);
+  } catch (e) { /* 热力图加载失败不阻塞统计视图 */ }
+
   // 14 天完成趋势（SVG 柱状图）
   const trend = data.trend || [];
   if (trend.length) {
@@ -1081,14 +1140,18 @@ function openExportModal() {
   body.innerHTML =
     ['todotxt|☑|Todo.txt|通用纯文本格式，每行一个任务，可被多数工具导入',
      'json|{}|JSON|完整结构化数据，含项目/标签/依赖/重复规则，适合备份',
-     'csv|▤|CSV|表格格式，可用 Excel / Numbers 打开']
+     'csv|▤|CSV|表格格式，可用 Excel / Numbers 打开',
+     'backup|◈|完整备份快照|全量快照（任务+项目+标签+模板+筛选+节假日），可在另一台设备「导入 → 同步合并」']
     .map(s => {
       const [fmt, ico, name, desc] = s.split('|');
       return '<div class="export-item" data-act="export-go" data-fmt="' + fmt + '">' +
         '<span class="ei-ico">' + ico + '</span>' +
         '<div><div class="ei-name">' + name + '</div><div class="ei-desc">' + desc + '</div></div></div>';
-    }).join('');
-  openModal('导出数据', body, null);
+    }).join('') +
+    '<div class="export-item" data-act="sync-open">' +
+    '<span class="ei-ico">' + svgIcon('sync', 16) + '</span>' +
+    '<div><div class="ei-name">同步合并备份</div><div class="ei-desc">把另一台设备导出的备份快照合并进本机（不删除本地数据）</div></div></div>';
+  openModal('导出 / 同步', body, null);
 }
 
 /* ---------------- 快捷键帮助 ---------------- */
@@ -1096,18 +1159,25 @@ function openHelpModal() {
   const body = document.createElement('div');
   body.innerHTML = '<table class="kbd-table">' +
     [['<kbd>⌘K</kbd> / <kbd>Ctrl K</kbd>', '打开命令面板'],
+     ['<kbd>⌘Z</kbd> / <kbd>Ctrl Z</kbd>', '撤销最近一次操作（创建/更新/删除/完成等均可撤销）'],
      ['<kbd>N</kbd>', '新建任务'],
+     ['<kbd>Q</kbd>', '聚焦快速录入框（自然语言）'],
      ['<kbd>/</kbd>', '聚焦搜索框'],
      ['<kbd>P</kbd>', '打开 / 收起番茄钟'],
+     ['<kbd>F</kbd>', '进入专注模式（全屏番茄钟，Esc 退出）'],
+     ['<kbd>D</kbd>', '切换到时间块日视图'],
      ['<kbd>T</kbd>', '切换深色 / 浅色主题'],
      ['<kbd>1</kbd> … <kbd>9</kbd>', '切换视图（今日/项目/标签/日历/看板/筛选/统计/甘特/回收站）'],
      ['<kbd>?</kbd>', '显示本帮助'],
-     ['<kbd>Esc</kbd>', '关闭弹窗 / 面板']]
+     ['<kbd>Esc</kbd>', '关闭弹窗 / 面板 / 专注模式']]
     .map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('') +
     '</table>' +
     '<div style="margin-top:12px;font-size:12px;color:var(--text-3)">' +
+    '快速录入语法：顶栏输入「明天下午3点 写周报 #工作 !高 /项目名」后回车，自动解析日期/时间/标签/优先级/项目；' +
+    '常用任务可在编辑器里「存为模板」，命令面板中一键实例化。' +
     '今日视图支持：批量模式（勾选后批量完成/移动/打标签）、拖拽任务行手动排序；' +
-    '任务行 ' + svgIcon('pomodoro', 12) + ' 按钮可将任务加入番茄钟。</div>';
+    '任务行 ' + svgIcon('pomodoro', 12) + ' 按钮可将任务加入番茄钟，' + svgIcon('focus', 12) + ' 按钮进入全屏专注。' +
+    '日视图点击时间轴空白处可在该时刻新建任务；多台设备间用「导出→完整备份快照 / 同步合并」搬数据。</div>';
   openModal('键盘快捷键', body, null);
 }
 
@@ -1122,7 +1192,13 @@ const PALETTE_CMDS = [
   { ico: svgIcon('stats'), label: '前往：统计', hint: '7', run: () => switchView('stats') },
   { ico: svgIcon('gantt'), label: '前往：甘特图', hint: '8', run: () => switchView('gantt') },
   { ico: svgIcon('trash'), label: '前往：回收站', hint: '9', run: () => switchView('trash') },
+  { ico: svgIcon('day'), label: '前往：日视图（时间块）', hint: 'D', run: () => switchView('day') },
+  { ico: svgIcon('undo'), label: '撤销最近一次操作', hint: '⌘Z', run: () => undoLast() },
+  { ico: svgIcon('focus'), label: '进入专注模式（全屏番茄钟）', hint: 'F', run: () => enterFocusMode() },
+  { ico: svgIcon('sync'), label: '多端同步（合并备份快照）', hint: '', run: () => openSyncModal() },
   { ico: svgIcon('plus'), label: '新建任务', hint: 'N', run: () => openTaskEditor(null) },
+  { ico: svgIcon('bolt'), label: '从模板新建任务', hint: '', run: () => openTemplatesModal() },
+  { ico: svgIcon('bolt'), label: '快速录入（自然语言）', hint: 'Q', run: () => { const q = $('#quick-input'); if (q) q.focus(); } },
   { ico: svgIcon('pomodoro'), label: '打开番茄钟', hint: 'P', run: () => showPomodoro() },
   { ico: svgIcon('theme'), label: '切换深色 / 浅色主题', hint: 'T', run: () => toggleTheme() },
   { ico: svgIcon('export'), label: '导出数据', hint: '', run: () => openExportModal() },
@@ -1247,6 +1323,111 @@ async function runPaletteSel() {
   }
 }
 
+/* ---------------- 快速录入（自然语言） ---------------- */
+async function quickAdd(text) {
+  try {
+    const r = await api('POST', '/api/quick-add', { text: text });
+    const p = r.parsed || {};
+    const bits = [];
+    if (p.dueDate) bits.push(fmtDate(p.dueDate));
+    if (p.remindTime) bits.push(p.remindTime);
+    if (p.priority === 2) bits.push('高优先级');
+    if (p.priority === 0) bits.push('低优先级');
+    if ((p.tags || []).length) bits.push('#' + p.tags.join(' #'));
+    if (p.project && !p.projectMatched) bits.push('项目「' + p.project + '」未找到，已忽略');
+    toast('已创建「' + p.title + '」' + (bits.length ? '（' + bits.join(' · ') + '）' : ''), 'ok');
+    await refreshAll();
+  } catch (e) { toast('快速录入失败：' + e.message, 'err'); }
+}
+
+/* ---------------- 任务模板 ---------------- */
+function openSaveTemplateModal(payload) {
+  const body = document.createElement('div');
+  body.innerHTML =
+    '<div class="form-row"><label>模板名称</label>' +
+    '<input id="tpl-name" class="st-input" type="text" value="' + esc(payload.title || '') + '"></div>' +
+    '<label style="display:flex;gap:8px;align-items:center;margin:12px 0;font-size:13px;cursor:pointer">' +
+    '<input type="checkbox" id="tpl-offset" checked style="accent-color:var(--primary)">' +
+    '日期按「相对今天的天数」保存（每次使用模板时自动换算为新日期）</label>' +
+    '<div style="font-size:12px;color:var(--text-3)">模板保存标题、备注、优先级、标签、重复规则与日期等信息。</div>';
+
+  const foot = document.createElement('div');
+  foot.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;width:100%';
+  const btnCancel = document.createElement('button');
+  btnCancel.className = 'btn';
+  btnCancel.textContent = '取消';
+  btnCancel.addEventListener('click', closeModal);
+  const btnSave = document.createElement('button');
+  btnSave.className = 'btn btn-primary';
+  btnSave.textContent = '保存模板';
+  btnSave.addEventListener('click', async () => {
+    const name = $('#tpl-name').value.trim() || payload.title;
+    if (!name) { toast('请填写模板名称', 'err'); return; }
+    const body2 = JSON.parse(JSON.stringify(payload));
+    if ($('#tpl-offset').checked) {
+      if (body2.dueDate) { body2.dueOffsetDays = daysBetween(S.today, body2.dueDate); body2.dueDate = ''; }
+      if (body2.startDate) { body2.startOffsetDays = daysBetween(S.today, body2.startDate); body2.startDate = ''; }
+    }
+    try {
+      await api('POST', '/api/templates', { name: name, body: body2 });
+      toast('模板已保存');
+      closeModal();
+    } catch (e) { toast(e.message, 'err'); }
+  });
+  foot.appendChild(btnCancel);
+  foot.appendChild(btnSave);
+  openModal('保存为模板', body, foot);
+}
+
+async function openTemplatesModal() {
+  let list = [];
+  try { list = (await apiGet('/api/templates')).templates || []; }
+  catch (e) { toast(e.message, 'err'); return; }
+  const body = document.createElement('div');
+  body.innerHTML = list.length
+    ? '<div class="tpl-list">' + list.map(t => {
+        const b = t.body || {};
+        const bits = [];
+        if (b.dueOffsetDays !== undefined) {
+          bits.push(b.dueOffsetDays === 0 ? '当天到期'
+            : (b.dueOffsetDays > 0 ? '当天 +' + b.dueOffsetDays + ' 天' : '当天 ' + b.dueOffsetDays + ' 天'));
+        }
+        if (b.priority === 2) bits.push('高优先级');
+        if ((b.tags || []).length) bits.push('#' + b.tags.join(' #'));
+        if (b.repeatRule && b.repeatRule.freq) bits.push('重复');
+        return '<div class="tpl-item">' +
+          '<div class="tpl-info">' +
+          '<div class="tpl-name">' + esc(t.name) + '</div>' +
+          '<div class="tpl-meta">' + esc(b.title || '') + (bits.length ? ' · ' + bits.join(' · ') : '') + '</div>' +
+          '</div>' +
+          '<button class="btn btn-sm btn-primary" data-tpl-use="' + t.id + '">创建任务</button>' +
+          '<button class="btn btn-sm" data-tpl-del="' + t.id + '">删除</button>' +
+          '</div>';
+      }).join('') + '</div>'
+    : '<div class="empty-tip">暂无模板。在任务编辑器里点「存为模板」即可把常用任务存为模板。</div>';
+  body.addEventListener('click', async e => {
+    const u = e.target.closest('[data-tpl-use]');
+    const d = e.target.closest('[data-tpl-del]');
+    if (u) {
+      try {
+        const r = await api('POST', '/api/templates/' + u.dataset.tplUse + '/apply');
+        toast('已从模板创建任务 #' + r.task.id, 'ok');
+        closeModal();
+        await refreshAll();
+      } catch (err) { toast(err.message, 'err'); }
+    } else if (d) {
+      if (!confirm('删除该模板？')) return;
+      try {
+        await api('DELETE', '/api/templates/' + d.dataset.tplDel);
+        toast('模板已删除');
+        closeModal();
+        openTemplatesModal();
+      } catch (err) { toast(err.message, 'err'); }
+    }
+  });
+  openModal('任务模板', body, null);
+}
+
 /* ---------------- 番茄钟 ---------------- */
 const POMO = { total: 25 * 60, remain: 25 * 60, running: false, taskId: 0, timer: null };
 
@@ -1303,20 +1484,22 @@ async function pomoTick() {
   renderPomo();
 }
 
+function pomoToggle() {
+  POMO.running = !POMO.running;
+  if (POMO.running && !POMO.timer)
+    POMO.timer = setInterval(pomoTick, 1000);
+  if (!POMO.running && POMO.timer) {
+    clearInterval(POMO.timer);
+    POMO.timer = null;
+  }
+  renderPomo();
+}
+
 function bindPomodoro() {
   $('#pomo-close').addEventListener('click', () => {
     $('#pomo-widget').classList.add('hidden');
   });
-  $('#pomo-start').addEventListener('click', () => {
-    POMO.running = !POMO.running;
-    if (POMO.running && !POMO.timer)
-      POMO.timer = setInterval(pomoTick, 1000);
-    if (!POMO.running && POMO.timer) {
-      clearInterval(POMO.timer);
-      POMO.timer = null;
-    }
-    renderPomo();
-  });
+  $('#pomo-start').addEventListener('click', pomoToggle);
   $('#pomo-reset').addEventListener('click', () => {
     POMO.running = false;
     if (POMO.timer) { clearInterval(POMO.timer); POMO.timer = null; }
@@ -1325,6 +1508,327 @@ function bindPomodoro() {
   });
   $('#pomo-task-select').addEventListener('change', e => {
     POMO.taskId = parseInt(e.target.value, 10) || 0;
+  });
+}
+
+/* ---------------- 撤销系统（Ctrl+Z） ---------------- */
+async function undoLast() {
+  try {
+    const info = await apiGet('/api/undo');
+    if (!info.canUndo) { toast('没有可撤销的操作'); return; }
+    const r = await api('POST', '/api/undo');
+    toast(r.desc || '已撤销', 'ok');
+    await refreshAll();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---------------- 时间块日视图 ---------------- */
+const DAY_HOUR_PX = 44;
+let dayNowTimer = null;
+
+function isoAddDays(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d));
+  t.setUTCDate(t.getUTCDate() + n);
+  return t.toISOString().slice(0, 10);
+}
+
+async function renderDay(content) {
+  const date = S.dayDate || S.today;
+  const data = await apiGet('/api/day?date=' + date);
+  const isToday = date === S.today;
+  const WD = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+
+  const head = viewHead('日视图', '时间块 + 全天 + 已完成');
+  content.appendChild(head);
+
+  // 日期导航条
+  const nav = document.createElement('div');
+  nav.className = 'day-nav';
+  nav.innerHTML =
+    '<button class="btn btn-sm" data-act="day-prev">‹ 前一天</button>' +
+    '<div class="day-title">' +
+      '<span class="dt-main">' + fmtDate(date) + ' ' + WD[data.weekday || 1] + '</span>' +
+      '<span class="dt-sub">农历' + esc(data.lunarText || '') +
+        (data.term ? ' · ' + esc(data.term) : '') +
+        (data.holidayName ? ' · 🎉 ' + esc(data.holidayName) : '') + '</span>' +
+    '</div>' +
+    '<button class="btn btn-sm" data-act="day-today">今天</button>' +
+    '<button class="btn btn-sm" data-act="day-next">后一天 ›</button>';
+  content.appendChild(nav);
+
+  const layout = document.createElement('div');
+  layout.className = 'day-layout';
+
+  // ---- 左侧：0-24 时间轴 ----
+  const timeline = document.createElement('div');
+  timeline.className = 'day-timeline';
+  let labelsHTML = '';
+  let slotsHTML = '';
+  for (let h = 0; h < 24; ++h) {
+    labelsHTML += '<div class="dt-hlabel"><span>' + String(h).padStart(2, '0') + ':00</span></div>';
+    slotsHTML += '<div class="dt-slot"></div>';
+  }
+  timeline.innerHTML =
+    '<div class="dt-body">' +
+    '<div class="dt-labels">' + labelsHTML + '</div>' +
+    '<div class="dt-canvas" id="dt-canvas">' + slotsHTML + '</div>' +
+    '</div>';
+
+  const canvas = timeline.querySelector('.dt-canvas');
+
+  // 时间块条目（同时段自动错位排布）
+  const byTime = {};
+  for (const e of (data.timed || [])) {
+    const t = (e.remindTime || '00:00').slice(0, 5);
+    (byTime[t] = byTime[t] || []).push(e);
+  }
+  for (const [time, entries] of Object.entries(byTime)) {
+    const [hh, mm] = time.split(':').map(Number);
+    const top = (hh * 60 + mm) / 60 * DAY_HOUR_PX;
+    entries.forEach((e, i) => {
+      const p = PRIO[e.priority] || PRIO[1];
+      const el = document.createElement('div');
+      el.className = 'dt-entry prio-' + e.priority + (e.virtual ? ' virtual' : '');
+      el.style.top = top + 'px';
+      el.style.left = (i * 10) + 'px';
+      el.style.right = (entries.length > 1 ? (entries.length - 1 - i) * 10 : 0) + 'px';
+      el.title = (e.virtual ? '（重复/农历实例）' : '') + time + ' ' + e.title;
+      el.innerHTML = '<span class="dte-time">' + time + '</span>' +
+        '<span class="dte-title">' + esc(e.title) + '</span>' +
+        (e.virtual ? '<span class="dte-flag">' + (e.lunarInstance ? '🏮' : '↻') + '</span>' : '') +
+        '<span class="dte-prio ' + p.cls + '">' + p.label + '</span>';
+      el.dataset.act = 'edit';
+      el.dataset.id = e.id;
+      canvas.appendChild(el);
+    });
+  }
+
+  // 现在时刻红线
+  if (isToday) {
+    const now = new Date();
+    const line = document.createElement('div');
+    line.className = 'dt-nowline';
+    line.id = 'dt-nowline';
+    const upd = () => {
+      const n = new Date();
+      line.style.top = ((n.getHours() * 60 + n.getMinutes()) / 60 * DAY_HOUR_PX) + 'px';
+      line.title = '现在 ' + String(n.getHours()).padStart(2, '0') + ':' + String(n.getMinutes()).padStart(2, '0');
+    };
+    upd();
+    canvas.appendChild(line);
+    clearInterval(dayNowTimer);
+    dayNowTimer = setInterval(() => {
+      if (!$('#dt-nowline')) { clearInterval(dayNowTimer); return; }
+      upd();
+    }, 60000);
+  }
+
+  // 点击空白时段 → 新建任务（预填日期与时间）
+  canvas.addEventListener('click', e => {
+    if (e.target.closest('.dt-entry')) return;
+    const rect = canvas.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const mins = Math.max(0, Math.min(23 * 60 + 45, Math.round(y / DAY_HOUR_PX * 60 / 15) * 15));
+    const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+    const mm = String(mins % 60).padStart(2, '0');
+    openTaskEditor({ dueDate: date, remindTime: hh + ':' + mm }, true);
+  });
+
+  layout.appendChild(timeline);
+
+  // ---- 右侧：全天 / 已完成 ----
+  const side = document.createElement('div');
+  side.className = 'day-side';
+
+  function sideCard(title, items, cls, emptyTip) {
+    const rows = (items || []).map(e => {
+      const p = PRIO[e.priority] || PRIO[1];
+      return '<div class="ds-item" data-act="edit" data-id="' + e.id + '">' +
+        '<span class="ds-prio ' + p.cls + '">' + p.label + '</span>' +
+        '<span class="ds-title">' + esc(e.title) + '</span>' +
+        (e.virtual ? '<span class="ds-flag">' + (e.lunarInstance ? '🏮' : '↻') + '</span>' : '') +
+        (e.projectName ? '<span class="ds-proj" style="color:' + esc(e.projectColor || '#4A90D9') + '">' +
+          esc(e.projectName) + '</span>' : '') +
+        '</div>';
+    }).join('');
+    return '<div class="day-card ' + (cls || '') + '"><div class="dc-head">' + title +
+      '<span class="cnt">' + (items || []).length + '</span></div>' +
+      (rows || '<div class="empty-tip">' + esc(emptyTip) + '</div>') + '</div>';
+  }
+
+  side.innerHTML = sideCard('全天任务', data.allday, '', '当日无全天任务') +
+    sideCard('已完成', data.done, 'done', '当日暂无完成记录');
+  layout.appendChild(side);
+  content.appendChild(layout);
+
+  // 滚动到当前时刻附近（今天）
+  if (isToday) {
+    const n = new Date();
+    timeline.scrollTop =
+      Math.max(0, (n.getHours() * 60 + n.getMinutes()) / 60 * DAY_HOUR_PX - 160);
+  }
+}
+
+/* ---------------- 专注模式（全屏番茄钟） ---------------- */
+let focusTimer = null;
+let focusKeyHandler = null;
+
+async function enterFocusMode(taskId) {
+  if ($('#focus-root')) return;
+  if (taskId) POMO.taskId = taskId;
+  if (!POMO.taskId) {
+    // 未指定任务：取今日第一个未完成任务
+    try {
+      const r = await apiGet('/api/today');
+      const pool = (r.overdue || []).concat(r.dueToday || [], r.startToday || [], r.noDate || []);
+      if (pool.length) POMO.taskId = pool[0].id;
+    } catch (e) { /* 忽略 */ }
+  }
+  let task = null;
+  if (POMO.taskId) {
+    try { task = await apiGet('/api/tasks/' + POMO.taskId); } catch (e) { /* 忽略 */ }
+  }
+
+  const ov = document.createElement('div');
+  ov.className = 'focus-overlay';
+  ov.id = 'focus-root';
+  ov.innerHTML =
+    '<div class="focus-box">' +
+    '<div class="focus-task" id="focus-task">' +
+      (task ? esc(task.title) : '自由专注（未关联任务）') + '</div>' +
+    '<div class="focus-timer" id="focus-timer">25:00</div>' +
+    '<div class="focus-btns">' +
+      '<button class="btn btn-primary btn-lg" id="focus-start">开始专注</button>' +
+      '<button class="btn btn-lg" id="focus-reset">重置</button>' +
+      (task && task.status !== 'done'
+        ? '<button class="btn btn-lg" id="focus-done">✓ 完成任务</button>' : '') +
+    '</div>' +
+    '<div class="focus-tip">Esc 退出专注模式 · 番茄钟与右下角挂件联动</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+
+  function updateFocusUI() {
+    const m = Math.floor(POMO.remain / 60), s = POMO.remain % 60;
+    const t = $('#focus-timer');
+    if (t) t.textContent = String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    const b = $('#focus-start');
+    if (b) b.textContent = POMO.running ? '暂停' : (POMO.remain < POMO.total ? '继续' : '开始专注');
+  }
+  updateFocusUI();
+  clearInterval(focusTimer);
+  focusTimer = setInterval(updateFocusUI, 500);
+
+  $('#focus-start').addEventListener('click', pomoToggle);
+  $('#focus-reset').addEventListener('click', () => {
+    POMO.running = false;
+    if (POMO.timer) { clearInterval(POMO.timer); POMO.timer = null; }
+    POMO.remain = POMO.total;
+    renderPomo();
+    updateFocusUI();
+  });
+  const btnDone = $('#focus-done');
+  if (btnDone) btnDone.addEventListener('click', async () => {
+    try {
+      const r = await api('POST', '/api/tasks/' + POMO.taskId + '/complete');
+      toast(r.nextInstance && r.nextInstance.id ? '已完成，已生成下一次' : '已完成', 'ok');
+      exitFocusMode();
+      await refreshAll();
+    } catch (e) { toast(e.message, 'err'); }
+  });
+
+  focusKeyHandler = e => {
+    if (e.key === 'Escape') { e.preventDefault(); exitFocusMode(); }
+  };
+  document.addEventListener('keydown', focusKeyHandler);
+}
+
+function exitFocusMode() {
+  const ov = $('#focus-root');
+  if (ov) ov.remove();
+  clearInterval(focusTimer);
+  focusTimer = null;
+  if (focusKeyHandler) {
+    document.removeEventListener('keydown', focusKeyHandler);
+    focusKeyHandler = null;
+  }
+}
+
+/* ---------------- 多端同步（备份快照合并） ---------------- */
+function openSyncModal() {
+  const body = document.createElement('div');
+  body.className = 'sync-box';
+  body.innerHTML =
+    '<div class="sync-step"><div class="ss-title">1. 选择备份快照文件</div>' +
+    '<div class="ss-desc">在另一台设备上「导出 → 完整备份快照」得到 .json 文件，在此选择该文件。' +
+    '合并策略：任务按 id 对齐、更新时间新者胜；项目/标签按名称合并；模板/筛选/节假日去重追加；' +
+    '本地已有数据不会被删除。</div>' +
+    '<input type="file" id="sync-file" accept=".json,application/json" class="sync-file"></div>' +
+    '<div class="sync-step"><div class="ss-title">2. 快照预览</div>' +
+    '<div id="sync-preview" class="sync-preview empty-tip">尚未选择文件</div></div>' +
+    '<div class="sync-step"><div class="ss-title">3. 合并结果</div>' +
+    '<div id="sync-result"></div></div>';
+
+  const foot = document.createElement('div');
+  foot.style.cssText = 'display:flex;gap:8px;width:100%';
+  const btnCancel = document.createElement('button');
+  btnCancel.className = 'btn';
+  btnCancel.textContent = '取消';
+  btnCancel.addEventListener('click', closeModal);
+  const btnGo = document.createElement('button');
+  btnGo.className = 'btn btn-primary';
+  btnGo.textContent = '开始合并';
+  btnGo.disabled = true;
+  foot.appendChild(btnCancel);
+  foot.appendChild(btnGo);
+
+  openModal('多端同步（合并备份快照）', body, foot);
+
+  let snap = null;
+  $('#sync-file').addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0];
+    const prev = $('#sync-preview');
+    snap = null;
+    btnGo.disabled = true;
+    if (!f) { prev.textContent = '尚未选择文件'; return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const d = JSON.parse(reader.result);
+        if (d.app !== 'cpp-todo' || !Array.isArray(d.tasks)) {
+          prev.textContent = '无效文件：应为「完整备份快照」导出的 .json';
+          prev.className = 'sync-preview sync-err';
+          return;
+        }
+        snap = d;
+        prev.className = 'sync-preview';
+        prev.innerHTML = '导出时间：' + esc(d.exportedAt || '未知') + '<br>' +
+          '任务 ' + d.tasks.length + ' 条 · 项目 ' + (d.projects || []).length +
+          ' 个 · 标签 ' + (d.tags || []).length + ' 个 · 模板 ' + (d.templates || []).length + ' 个';
+        btnGo.disabled = false;
+      } catch (err) {
+        prev.textContent = 'JSON 解析失败：' + err.message;
+        prev.className = 'sync-preview sync-err';
+      }
+    };
+    reader.readAsText(f);
+  });
+
+  btnGo.addEventListener('click', async () => {
+    if (!snap) return;
+    btnGo.disabled = true;
+    btnGo.textContent = '合并中…';
+    try {
+      const r = await api('POST', '/api/sync', snap);
+      $('#sync-result').innerHTML = '<div class="sync-ok">✓ ' + esc(r.summary || '合并完成') + '</div>';
+      toast('同步完成', 'ok');
+      await refreshAll();
+      setTimeout(closeModal, 1800);
+    } catch (err) {
+      $('#sync-result').innerHTML = '<div class="sync-err">✕ ' + esc(err.message) + '</div>';
+      btnGo.disabled = false;
+      btnGo.textContent = '重新合并';
+    }
   });
 }
 
@@ -1391,6 +1895,12 @@ function bindShortcuts() {
       openPalette();
       return;
     }
+    // 撤销（输入框内不拦截，保留文本编辑的原生撤销）
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      undoLast();
+      return;
+    }
     if (inField) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === 'n' || e.key === 'N') { e.preventDefault(); openTaskEditor(null); }
@@ -1400,7 +1910,10 @@ function bindShortcuts() {
       if (w.classList.contains('hidden')) showPomodoro();
       else w.classList.add('hidden');
     }
+    else if (e.key === 'd' || e.key === 'D') { e.preventDefault(); switchView('day'); }
+    else if (e.key === 'f' || e.key === 'F') { e.preventDefault(); enterFocusMode(); }
     else if (e.key === 't' || e.key === 'T') { toggleTheme(); }
+    else if (e.key === 'q' || e.key === 'Q') { e.preventDefault(); const q = $('#quick-input'); if (q) q.focus(); }
     else if (e.key === '?') { openHelpModal(); }
     else if (e.key >= '1' && e.key <= '9') {
       const v = KEY_VIEWS[parseInt(e.key, 10) - 1];
@@ -1449,8 +1962,9 @@ function closeModal() {
 }
 
 /* ---------------- 任务编辑器 ---------------- */
-async function openTaskEditor(task) {
-  const editing = !!task;
+/* task：编辑时传任务对象；新建但需预填字段（如日视图时段点击）时传 {..} 且 forceNew=true */
+async function openTaskEditor(task, forceNew) {
+  const editing = forceNew ? false : !!task;
   const t = task || {};
   const tagsAll = S.tags;
 
@@ -1626,6 +2140,61 @@ async function openTaskEditor(task) {
     });
   });
 
+  // 重复规则预览：显示规则接下来命中的日期
+  const repPrev = document.createElement('div');
+  repPrev.className = 'tf-rep-preview';
+  repPrev.id = 'tf-rep-preview';
+  repBox.appendChild(repPrev);
+  let repPrevTimer = null;
+  function collectRepeatRuleForPreview() {
+    const f = freqSel.value;
+    if (!f) return null;
+    const r = { freq: f, interval: Math.max(1, parseInt($('#tf-interval').value, 10) || 1) };
+    if (f === 'weekly' || f === 'custom') {
+      const wd = Array.from(wdRow.querySelectorAll('.wd-box.on'))
+        .map(b => parseInt(b.dataset.wd, 10)).sort((a, b) => a - b);
+      if (wd.length) r.weekdays = wd;
+    }
+    r.skipWeekends = $('#tf-sk-wk').checked;
+    r.skipHolidays = $('#tf-sk-hd').checked;
+    r.endDate = $('#tf-enddate').value;
+    return r;
+  }
+  async function updateRepPreview() {
+    const rule = collectRepeatRuleForPreview();
+    if (!rule) { repPrev.innerHTML = ''; return; }
+    if ((rule.freq === 'weekly' || rule.freq === 'custom') && !(rule.weekdays && rule.weekdays.length)) {
+      repPrev.innerHTML = '<span class="rp-hint">请先勾选每周几，预览将显示命中日期</span>';
+      return;
+    }
+    try {
+      const from = $('#tf-due').value || S.today;
+      const r = await api('POST', '/api/repeat-preview', { rule: rule, from: from, count: 6 });
+      const dates = r.dates || [];
+      repPrev.innerHTML = dates.length
+        ? '<span class="rp-label">' + svgIcon('calendar', 12) + ' 接下来</span>' +
+          dates.map(d => '<span class="rp-date">' + fmtDate(d) + '</span>').join('<span class="rp-sep">·</span>')
+        : '<span class="rp-hint">该规则在此起点下没有未来实例</span>';
+    } catch (e) {
+      repPrev.innerHTML = '<span class="rp-hint">预览失败：' + esc(e.message) + '</span>';
+    }
+  }
+  function queueRepPreview() {
+    clearTimeout(repPrevTimer);
+    repPrevTimer = setTimeout(updateRepPreview, 250);
+  }
+  freqSel.addEventListener('change', queueRepPreview);
+  ['#tf-interval', '#tf-enddate', '#tf-due'].forEach(id => {
+    const el = $(id, form);
+    if (el) el.addEventListener('input', queueRepPreview);
+  });
+  ['#tf-sk-wk', '#tf-sk-hd'].forEach(id => {
+    const el = $(id, form);
+    if (el) el.addEventListener('change', queueRepPreview);
+  });
+  wdRow.querySelectorAll('.wd-box').forEach(b => b.addEventListener('click', queueRepPreview));
+  updateRepPreview();
+
   // 新标签
   const newTagInput = $('#tf-newtag', form);
   newTagInput.addEventListener('keydown', e => {
@@ -1679,10 +2248,20 @@ async function openTaskEditor(task) {
   btnCancel.className = 'btn';
   btnCancel.textContent = '取消';
   btnCancel.addEventListener('click', closeModal);
+  const btnTpl = document.createElement('button');
+  btnTpl.className = 'btn';
+  btnTpl.textContent = '存为模板';
+  btnTpl.title = '把当前填写的内容保存为任务模板';
+  btnTpl.addEventListener('click', () => {
+    const payload = collectTask(t);
+    if (!payload.title) { toast('请先填写标题', 'err'); return; }
+    openSaveTemplateModal(payload);
+  });
   const btnSave = document.createElement('button');
   btnSave.className = 'btn btn-primary';
   btnSave.textContent = editing ? '保存修改' : '创建任务';
   foot.appendChild(btnCancel);
+  foot.appendChild(btnTpl);
   foot.appendChild(btnSave);
 
   openModal(editing ? ('编辑任务 #' + t.id) : '新建任务', body, foot);
@@ -1780,6 +2359,13 @@ function openImportModal() {
   foot.appendChild(btnGo);
 
   openModal('导入数据（滴答 / Todoist / Todo.txt）', body, foot);
+
+  // 同步合并入口（备份快照）
+  const syncLink = document.createElement('div');
+  syncLink.className = 'sync-entry-link';
+  syncLink.innerHTML = '<button type="button" class="btn btn-sm" data-act="sync-open">' +
+    svgIcon('sync', 12) + ' 从另一台设备合并备份快照？点此多端同步</button>';
+  body.appendChild(syncLink);
 
   btnGo.addEventListener('click', async () => {
     const format = $('#imp-format').value;
@@ -1990,6 +2576,17 @@ function bindEvents() {
   $('#btn-theme').addEventListener('click', toggleTheme);
   $('#btn-export').addEventListener('click', openExportModal);
   $('#btn-palette').addEventListener('click', openPalette);
+
+  // 快速录入（自然语言）：Enter 提交
+  const qi = $('#quick-input');
+  if (qi) {
+    qi.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        const v = qi.value.trim();
+        if (v) { quickAdd(v); qi.value = ''; }
+      } else if (e.key === 'Escape') { qi.value = ''; qi.blur(); }
+    });
+  }
   bindDragEvents();
   bindShortcuts();
 
@@ -2081,6 +2678,12 @@ function bindEvents() {
         S.selectedTag = null;
         renderProjectTree();
         await switchView('projects');
+      } else if (a === 'hm-prev') {
+        S.heatYear = (S.heatYear || parseInt(S.today.slice(0, 4), 10)) - 1;
+        await switchView('stats');
+      } else if (a === 'hm-next') {
+        S.heatYear = (S.heatYear || parseInt(S.today.slice(0, 4), 10)) + 1;
+        await switchView('stats');
       } else if (a === 'cal-prev') {
         if (S.calMode === 'week') {
           S.weekOffset--;
@@ -2136,6 +2739,17 @@ function bindEvents() {
         await switchView(S.view);
       } else if (a === 'pomo') {
         showPomodoro(id);
+      } else if (a === 'focus') {
+        await enterFocusMode(id);
+      } else if (a === 'day-prev') {
+        S.dayDate = isoAddDays(S.dayDate || S.today, -1);
+        await switchView('day');
+      } else if (a === 'day-next') {
+        S.dayDate = isoAddDays(S.dayDate || S.today, 1);
+        await switchView('day');
+      } else if (a === 'day-today') {
+        S.dayDate = '';
+        await switchView('day');
       } else if (a === 'export-go') {
         window.open('/api/export?format=' + act.dataset.fmt, '_blank');
         toast('已开始下载');
@@ -2238,10 +2852,12 @@ function bindEvents() {
     if (e.key === 'Escape') drop.classList.add('hidden');
   });
 
-  // 模态框内点击关闭
+  // 模态框内点击关闭；同步入口（导出/导入弹窗内）
   $('#modal-root').addEventListener('click', e => {
     const c = e.target.closest('[data-act="close-modal"]');
     if (c) closeModal();
+    const s = e.target.closest('[data-act="sync-open"]');
+    if (s) { closeModal(); openSyncModal(); }
   });
 }
 

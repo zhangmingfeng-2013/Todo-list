@@ -4,10 +4,33 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="light">
-<title>todo · 本机待办</title>
+<title>cpp-todo · 本机待办</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<!-- SVG 图标精灵 -->
+<svg style="display:none">
+  <symbol id="icon-today" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 2"/></symbol>
+  <symbol id="icon-projects" viewBox="0 0 16 16"><path d="M3 5h10M3 8h10M3 11h10"/></symbol>
+  <symbol id="icon-tags" viewBox="0 0 16 16"><path d="M4 3h5l5 5-5 5-5-5z"/></symbol>
+  <symbol id="icon-calendar" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="11" rx="1"/><path d="M2 7h12M5 2v3M11 2v3"/></symbol>
+  <symbol id="icon-kanban" viewBox="0 0 16 16"><rect x="2" y="3" width="3" height="10" rx="1"/><rect x="6.5" y="3" width="3" height="10" rx="1"/><rect x="11" y="3" width="3" height="10" rx="1"/></symbol>
+  <symbol id="icon-filters" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="M13 13l-3-3"/></symbol>
+  <symbol id="icon-stats" viewBox="0 0 16 16"><rect x="2" y="10" width="3" height="4"/><rect x="6.5" y="6" width="3" height="8"/><rect x="11" y="2" width="3" height="12"/></symbol>
+  <symbol id="icon-gantt" viewBox="0 0 16 16"><path d="M2 5h6M2 9h10M2 13h4"/></symbol>
+  <symbol id="icon-trash" viewBox="0 0 16 16"><path d="M3 5h10M5 5V3h6v2M6 8v5M10 8v5"/></symbol>
+  <symbol id="icon-pomodoro" viewBox="0 0 16 16"><circle cx="8" cy="9" r="5"/><path d="M8 4V2M6 4L5 2M10 4l1-2"/></symbol>
+  <symbol id="icon-bolt" viewBox="0 0 16 16"><path d="M9 1L4 8h3.2L6 15l6-8H8.8z"/></symbol>
+  <symbol id="icon-cmd" viewBox="0 0 16 16"><path d="M9 2L5 9h4l-1 5 5-7H9z"/></symbol>
+  <symbol id="icon-export" viewBox="0 0 16 16"><path d="M8 2v8M5 6l3-3 3 3M3 11h10"/></symbol>
+  <symbol id="icon-theme" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3"/><path d="M8 2v2M8 12v2M2 8h2M12 8h2M4 4l1.5 1.5M11 11l1.5 1.5M4 12l1.5-1.5M11 5l1.5-1.5"/></symbol>
+  <symbol id="icon-import" viewBox="0 0 16 16"><path d="M8 14V6M5 9l3 3 3-3M3 4h10"/></symbol>
+  <symbol id="icon-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+  <symbol id="icon-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="M13 13l-3-3"/></symbol>
+  <symbol id="icon-check" viewBox="0 0 16 16"><path d="M3 8l3 3 7-7"/></symbol>
+  <symbol id="icon-close" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+</svg>
+
 <div id="app">
   <!-- ============ 侧边栏 ============ -->
   <aside id="sidebar">
@@ -21,22 +44,34 @@
 
     <nav id="view-nav">
       <button data-view="today" class="nav-item active" title="今日面板">
-        <span class="nav-ico">◷</span>今日
+        <span class="nav-ico"><svg><use href="#icon-today"/></svg></span>今日
       </button>
       <button data-view="projects" class="nav-item" title="项目视图">
-        <span class="nav-ico">▤</span>项目
+        <span class="nav-ico"><svg><use href="#icon-projects"/></svg></span>项目
       </button>
       <button data-view="tags" class="nav-item" title="标签筛选">
-        <span class="nav-ico">#</span>标签
+        <span class="nav-ico"><svg><use href="#icon-tags"/></svg></span>标签
       </button>
       <button data-view="calendar" class="nav-item" title="日历视图">
-        <span class="nav-ico">▦</span>日历
+        <span class="nav-ico"><svg><use href="#icon-calendar"/></svg></span>日历
       </button>
       <button data-view="kanban" class="nav-item" title="看板视图">
-        <span class="nav-ico">≡</span>看板
+        <span class="nav-ico"><svg><use href="#icon-kanban"/></svg></span>看板
       </button>
       <button data-view="filters" class="nav-item" title="保存的筛选">
-        <span class="nav-ico">⌕</span>筛选
+        <span class="nav-ico"><svg><use href="#icon-filters"/></svg></span>筛选
+      </button>
+      <button data-view="stats" class="nav-item" title="统计仪表盘">
+        <span class="nav-ico"><svg><use href="#icon-stats"/></svg></span>统计
+      </button>
+      <button data-view="gantt" class="nav-item" title="甘特 / 依赖图">
+        <span class="nav-ico"><svg><use href="#icon-gantt"/></svg></span>甘特图
+      </button>
+      <button data-view="trash" class="nav-item" title="回收站（30 天自动清理）">
+        <span class="nav-ico"><svg><use href="#icon-trash"/></svg></span>回收站
+      </button>
+      <button data-act="open-pomo" class="nav-item" title="打开番茄钟（P）">
+        <span class="nav-ico"><svg><use href="#icon-pomodoro"/></svg></span>番茄钟
       </button>
     </nav>
 
@@ -61,14 +96,21 @@
   <!-- ============ 主区域 ============ -->
   <main id="main">
     <header id="topbar">
+      <div class="quick-wrap" title="自然语言快速录入：明天下午3点 写周报 #工作 !高 /项目名">
+        <span class="quick-ico"><svg><use href="#icon-bolt"/></svg></span>
+        <input id="quick-input" type="text" placeholder="快速录入：明天下午3点 写周报 #工作 !高" autocomplete="off">
+      </div>
       <div class="search-wrap">
-        <span class="search-ico">⌕</span>
+        <span class="search-ico"><svg><use href="#icon-search"/></svg></span>
         <input id="search-input" type="text" placeholder="搜索任务（标题 / 备注）…" autocomplete="off">
         <div id="search-drop" class="hidden"></div>
       </div>
       <div class="top-actions">
-        <button id="btn-import" class="btn" title="从滴答 / Todoist / Todo.txt 导入">⇩ 导入</button>
-        <button id="btn-new" class="btn btn-primary">＋ 新建任务</button>
+        <button id="btn-palette" class="btn" title="命令面板（⌘K / Ctrl+K）"><span class="btn-ico"><svg><use href="#icon-cmd"/></svg></span>命令面板</button>
+        <button id="btn-export" class="btn" title="导出 Todo.txt / JSON / CSV"><span class="btn-ico"><svg><use href="#icon-export"/></svg></span>导出</button>
+        <button id="btn-theme" class="btn" title="切换深色模式（T）"><span class="btn-ico"><svg><use href="#icon-theme"/></svg></span>主题</button>
+        <button id="btn-import" class="btn" title="从滴答 / Todoist / Todo.txt 导入"><span class="btn-ico"><svg><use href="#icon-import"/></svg></span>导入</button>
+        <button id="btn-new" class="btn btn-primary"><span class="btn-ico"><svg><use href="#icon-plus"/></svg></span>新建任务</button>
       </div>
     </header>
     <div id="content"></div>
@@ -79,6 +121,23 @@
 <div id="modal-root"></div>
 <!-- 轻提示根节点 -->
 <div id="toast-root"></div>
+<!-- 番茄钟挂件 -->
+<div id="pomo-widget" class="hidden">
+  <div id="pomo-header">
+    <span id="pomo-task-name"><svg class="btn-ico" style="vertical-align:-3px"><use href="#icon-pomodoro"/></svg> 番茄钟</span>
+    <button id="pomo-close" title="收起"><svg width="12" height="12"><use href="#icon-close"/></svg></button>
+  </div>
+  <div id="pomo-body">
+    <div id="pomo-timer">25:00</div>
+    <div id="pomo-controls">
+      <select id="pomo-task-select"><option value="0">（不关联任务）</option></select>
+    </div>
+    <div id="pomo-btns">
+      <button id="pomo-start" class="btn btn-sm btn-primary">开始</button>
+      <button id="pomo-reset" class="btn btn-sm">重置</button>
+    </div>
+  </div>
+</div>
 
 <script src="vendor/marked.min.js"></script>
 <script src="app.js"></script>

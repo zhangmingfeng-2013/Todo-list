@@ -1,5 +1,8 @@
 .idea/
 .workbuddy/
+.vscode/
 cmake-build-debug/
 date/
 build/CMakeFiles
+build/.cmake
+todo-export-2026-08-25.todotxt

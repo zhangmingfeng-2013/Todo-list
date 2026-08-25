@@ -66,6 +66,12 @@ private:
     Db& db_;
 };
 
+// ---- 撤销系统与同步的辅助函数（定义见下文） ----
+Json task_snapshot_json(Db& db, long long id);
+void record_undo(Db& db, const std::string& action, long long task_id,
+                 const Json& before, long long after_id, const std::string& label);
+Json build_full_snapshot(Db& db);
+
 // ---- 任务 JSON 组装 ----
 Json task_basic_json(Db& db, const Db::Row& r) {
     Json j = Json::object();
@@ -203,6 +209,8 @@ Json apply_task_body(Db& db, const Json& body, long long id, bool& ok, std::stri
     };
 
     if (id > 0) {
+        // 撤销埋点：更新前先拍快照
+        Json undo_before = task_snapshot_json(db, id);
         if (body.has("title")) upd("title", body["title"]);
         if (body.has("notes")) upd("notes", body["notes"]);
         if (body.has("priority")) upd("priority", body["priority"]);
@@ -240,6 +248,10 @@ Json apply_task_body(Db& db, const Json& body, long long id, bool& ok, std::stri
         }
         db.exec("UPDATE tasks SET updated_at=datetime('now','localtime') WHERE id=" +
                 std::to_string(id));
+        // 撤销埋点：更新 → 撤销即恢复快照（仅当实际有字段变更时记录）
+        if (!undo_before.empty())
+            record_undo(db, "update", id, undo_before, 0,
+                        undo_before["title"].as_string_or(""));
     } else {
         // 创建
         std::string title = body["title"].as_string_or("");
@@ -278,6 +290,8 @@ Json apply_task_body(Db& db, const Json& body, long long id, bool& ok, std::stri
                           (repeat_rule.empty() ? "''" : qstr(repeat_rule)) + ")";
         db.exec(sql);
         id = db.last_insert_rowid();
+        // 撤销埋点：新建任务 → 撤销即删除
+        record_undo(db, "create", 0, Json::object(), id, title);
     }
     // 标签处理
     if (body["tags"].is_array()) {
@@ -304,6 +318,457 @@ Json error_json(const std::string& msg) {
     j["ok"] = false;
     j["error"] = msg;
     return j;
+}
+
+// ==================== 撤销系统 ====================
+
+// 任务完整快照（含标签与依赖），用于撤销时恢复
+Json task_snapshot_json(Db& db, long long id) {
+    Json j = Json::object();
+    auto row = db.query_one("SELECT * FROM tasks WHERE id=?", {std::to_string(id)});
+    if (!row) return j;
+    j["id"] = id;
+    j["title"] = row->get("title");
+    j["notes"] = row->get("notes");
+    j["priority"] = row->get_int("priority");
+    j["start_date"] = row->get("start_date");
+    j["due_date"] = row->get("due_date");
+    j["remind_time"] = row->get("remind_time");
+    j["has_reminder"] = row->get_int("has_reminder");
+    j["lunar_remind"] = row->get_int("lunar_remind");
+    j["lunar_date"] = row->get("lunar_date");
+    j["project_id"] = row->get_int("project_id");
+    j["parent_id"] = row->get_int("parent_id");
+    j["sort_order"] = row->get_int("sort_order");
+    j["status"] = row->get("status");
+    j["completed_at"] = row->get("completed_at");
+    j["pomodoros"] = row->get_int("pomodoros");
+    j["deleted_at"] = row->get("deleted_at");
+    j["repeat_rule"] = row->get("repeat_rule");
+    j["created_at"] = row->get("created_at");
+    j["updated_at"] = row->get("updated_at");
+    Json tags = Json::array();
+    for (auto& t : db.query(
+             "SELECT t.name FROM tags t JOIN task_tags tt ON t.id=tt.tag_id "
+             "WHERE tt.task_id=? ORDER BY t.name", {std::to_string(id)}))
+        tags.push_back(t.get("name"));
+    j["tags"] = tags;
+    Json deps = Json::array();
+    for (auto& d : db.query(
+             "SELECT depends_on FROM task_dependencies WHERE task_id=?",
+             {std::to_string(id)}))
+        deps.push_back(d.get_int("depends_on"));
+    j["depends_on"] = deps;
+    return j;
+}
+
+// 记录一条可撤销操作（快照在执行操作【前】采集）
+void record_undo(Db& db, const std::string& action, long long task_id,
+                 const Json& before, long long after_id, const std::string& label) {
+    Json payload = Json::object();
+    payload["before"] = before;
+    db.exec("INSERT INTO undo_log(action,task_id,after_id,label,payload) VALUES(" +
+            qstr(action) + "," + std::to_string(task_id) + "," +
+            std::to_string(after_id) + "," + qstr(label) + "," +
+            qstr(payload.dump()) + ")");
+    // 环形上限：仅保留最近 200 条
+    db.exec("DELETE FROM undo_log WHERE id <= (SELECT MAX(id) FROM undo_log) - 200");
+}
+
+// 用快照恢复任务（行不存在时按原 id 重建，用于撤销 purge）
+static void restore_task_from_snapshot(Db& db, const Json& b) {
+    long long id = b["id"].as_int_or(0);
+    if (id <= 0) return;
+    auto s = [&](const char* k) { return b[k].as_string_or(""); };
+    auto n = [&](const char* k) { return std::to_string(b[k].as_int_or(0)); };
+    auto val = [&](const std::string& v) { return v.empty() ? "NULL" : qstr(v); };
+    auto nullable_id = [&](const char* k) {
+        long long v = b[k].as_int_or(0);
+        return v ? std::to_string(v) : std::string("NULL");
+    };
+    bool exists = db.query_one("SELECT 1 FROM tasks WHERE id=?",
+                               {std::to_string(id)}).has_value();
+    std::string fields =
+        "title=" + qstr(s("title")) + ", notes=" + qstr(s("notes")) +
+        ", priority=" + n("priority") +
+        ", start_date=" + val(s("start_date")) + ", due_date=" + val(s("due_date")) +
+        ", remind_time=" + val(s("remind_time")) + ", has_reminder=" + n("has_reminder") +
+        ", lunar_remind=" + n("lunar_remind") + ", lunar_date=" + val(s("lunar_date")) +
+        ", project_id=" + nullable_id("project_id") +
+        ", sort_order=" + n("sort_order") + ", status=" + qstr(s("status")) +
+        ", completed_at=" + val(s("completed_at")) + ", pomodoros=" + n("pomodoros") +
+        ", deleted_at=" + val(s("deleted_at")) + ", repeat_rule=" + qstr(s("repeat_rule"));
+    if (exists) {
+        db.exec("UPDATE tasks SET " + fields +
+                ", parent_id=" + nullable_id("parent_id") +
+                " WHERE id=" + std::to_string(id));
+    } else {
+        // 撤销彻底删除：按原 id 重建（先不带 parent，稍后二次修复避免外键顺序问题）
+        db.exec("INSERT INTO tasks(id," + std::string(
+                    "title,notes,priority,start_date,due_date,remind_time,has_reminder,"
+                    "lunar_remind,lunar_date,project_id,parent_id,sort_order,status,"
+                    "completed_at,pomodoros,deleted_at,repeat_rule,created_at,updated_at) ") +
+                "VALUES(" + std::to_string(id) + "," + qstr(s("title")) + "," +
+                qstr(s("notes")) + "," + n("priority") + "," + val(s("start_date")) + "," +
+                val(s("due_date")) + "," + val(s("remind_time")) + "," + n("has_reminder") +
+                "," + n("lunar_remind") + "," + val(s("lunar_date")) + "," +
+                nullable_id("project_id") + ",NULL," + n("sort_order") + "," +
+                qstr(s("status")) + "," + val(s("completed_at")) + "," + n("pomodoros") +
+                "," + val(s("deleted_at")) + "," + qstr(s("repeat_rule")) + "," +
+                qstr(s("created_at")) + "," + qstr(s("updated_at")) + ")");
+        long long par = b["parent_id"].as_int_or(0);
+        if (par && db.query_one("SELECT 1 FROM tasks WHERE id=?",
+                                {std::to_string(par)}).has_value())
+            db.exec("UPDATE tasks SET parent_id=" + std::to_string(par) +
+                    " WHERE id=" + std::to_string(id));
+    }
+    // 标签恢复
+    db.exec("DELETE FROM task_tags WHERE task_id=" + std::to_string(id));
+    if (b["tags"].is_array()) {
+        for (auto& t : b["tags"]) {
+            std::string name = t.as_string_or("");
+            if (name.empty()) continue;
+            auto row = db.query_one("SELECT id FROM tags WHERE name=?", {name});
+            long long tid;
+            if (row) tid = row->get_int("id");
+            else {
+                db.exec("INSERT INTO tags(name) VALUES(" + qstr(name) + ")");
+                tid = db.last_insert_rowid();
+            }
+            db.exec("INSERT OR IGNORE INTO task_tags(task_id,tag_id) VALUES(" +
+                    std::to_string(id) + "," + std::to_string(tid) + ")");
+        }
+    }
+    // 依赖恢复
+    db.exec("DELETE FROM task_dependencies WHERE task_id=" + std::to_string(id));
+    if (b["depends_on"].is_array()) {
+        for (auto& d : b["depends_on"]) {
+            long long dep = d.as_int_or(0);
+            if (dep <= 0 || dep == id) continue;
+            if (!db.query_one("SELECT 1 FROM tasks WHERE id=?",
+                              {std::to_string(dep)}).has_value())
+                continue;
+            db.exec("INSERT OR IGNORE INTO task_dependencies(task_id,depends_on) VALUES(" +
+                    std::to_string(id) + "," + std::to_string(dep) + ")");
+        }
+    }
+}
+
+// 全量快照（多端同步 / 完整备份用）
+Json build_full_snapshot(Db& db) {
+    Json j = Json::object();
+    j["app"] = "cpp-todo";
+    j["snapshotVersion"] = static_cast<long long>(1);
+    j["exportedAt"] = now_local();
+    Json tasks = Json::array();
+    for (auto& r : db.query("SELECT id FROM tasks ORDER BY id"))
+        tasks.push_back(task_snapshot_json(db, r.get_int("id")));
+    j["tasks"] = tasks;
+    Json projects = Json::array();
+    for (auto& p : db.query("SELECT * FROM projects ORDER BY id")) {
+        Json pj = Json::object();
+        pj["id"] = p.get_int("id");
+        pj["name"] = p.get("name");
+        pj["parentId"] = p.get_int("parent_id");
+        pj["color"] = p.get("color", "#4A90D9");
+        pj["isFolder"] = p.get_int("is_folder") != 0;
+        pj["sortOrder"] = p.get_int("sort_order");
+        projects.push_back(pj);
+    }
+    j["projects"] = projects;
+    Json tags = Json::array();
+    for (auto& t : db.query("SELECT * FROM tags ORDER BY id")) {
+        Json tj = Json::object();
+        tj["name"] = t.get("name");
+        tj["color"] = t.get("color", "#8E8E93");
+        tags.push_back(tj);
+    }
+    j["tags"] = tags;
+    Json templates = Json::array();
+    for (auto& t : db.query("SELECT * FROM templates ORDER BY id")) {
+        Json tj = Json::object();
+        tj["name"] = t.get("name");
+        tj["body"] = t.get("body");
+        templates.push_back(tj);
+    }
+    j["templates"] = templates;
+    Json filters = Json::array();
+    for (auto& f : db.query("SELECT * FROM saved_filters ORDER BY id")) {
+        Json fj = Json::object();
+        fj["name"] = f.get("name");
+        fj["spec"] = f.get("spec");
+        filters.push_back(fj);
+    }
+    j["filters"] = filters;
+    Json hols = Json::array();
+    for (auto& h : db.query("SELECT date FROM holidays ORDER BY date"))
+        hols.push_back(h.get("date"));
+    j["holidays"] = hols;
+    return j;
+}
+
+// ==================== 自然语言快速录入解析 ====================
+// 支持：今天/明天/后天/大后天/N天后/周X/下周X/星期X/礼拜X/M月D日/M月D号/MM-DD/YYYY-MM-DD
+//       上午|下午|晚上|中午|早上H点 / H:MM / H点M分（可与日期组合，如「明天下午3点」）
+//       #标签  !高|!中|!低|!2|!1|!0|!high  /项目名
+struct QuickParse {
+    std::string title;
+    std::vector<std::string> tags;
+    std::string projectName;
+    int priority = -1;        // -1 = 未指定
+    std::string dueDate;      // YYYY-MM-DD
+    std::string remindTime;   // HH:MM
+};
+
+static bool has_prefix(const std::string& s, const std::string& p) {
+    return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+}
+static bool has_suffix(const std::string& s, const std::string& p) {
+    return s.size() >= p.size() && s.compare(s.size() - p.size(), p.size(), p) == 0;
+}
+static std::string replace_all_str(std::string s, const std::string& a, const std::string& b) {
+    size_t pos = 0;
+    while ((pos = s.find(a, pos)) != std::string::npos) { s.replace(pos, a.size(), b); pos += b.size(); }
+    return s;
+}
+
+// 公历天数（Howard Hinnant 算法，1970-01-01 = 0）
+static long days_from_civil(int y, int m, int d) {
+    y -= m <= 2;
+    long era = (y >= 0 ? y : y - 399) / 400;
+    long yoe = y - era * 400;
+    long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+static std::string iso_from_days(long z) {
+    z += 719468;
+    long era = (z >= 0 ? z : z - 146096) / 146097;
+    long doe = z - era * 146097;
+    long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    long y = yoe + era * 400;
+    long doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    long mp = (5 * doy + 2) / 153;
+    long d = doy - (153 * mp + 2) / 5 + 1;
+    long m = mp + (mp < 10 ? 3 : -9);
+    y += (m <= 2);
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%04ld-%02ld-%02ld", y, m, d);
+    return buf;
+}
+static std::string fmt_iso(int y, int m, int d) {
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%04d-%02d-%02d", y, m, d);
+    return buf;
+}
+
+// 中文数字（0-99）→ int；支持阿拉伯与「一~十/两」
+static int cn_digit(const std::string& s) {
+    const char* cn[] = {"一", "二", "三", "四", "五", "六", "七", "八", "九"};
+    for (int i = 0; i < 9; ++i) if (s == cn[i]) return i + 1;
+    return 0;
+}
+static int parse_cn_int(const std::string& s) {
+    if (s.empty()) return 0;
+    bool digits = !s.empty();
+    for (char c : s) if (c < '0' || c > '9') { digits = false; break; }
+    if (digits) return std::atoi(s.c_str());
+    if (s == "两") return 2;
+    if (s == "十") return 10;
+    size_t pos = s.find("十");
+    if (pos != std::string::npos) {
+        std::string a = s.substr(0, pos);
+        std::string b = s.substr(pos + 3);
+        int hi = a.empty() ? 1 : cn_digit(a);
+        int lo = b.empty() ? 0 : cn_digit(b);
+        if (hi > 0) return hi * 10 + lo;
+    }
+    return cn_digit(s);
+}
+
+// 星期几子串 → 1-7（周一=1，周日=7）；consumed = 消耗字节数
+static int parse_weekday_str(const std::string& s, int& consumed) {
+    consumed = 0;
+    if (s.empty()) return 0;
+    if (s[0] >= '1' && s[0] <= '7') { consumed = 1; return s[0] - '0'; }
+    const char* names[] = {"一", "二", "三", "四", "五", "六", "日", "天"};
+    for (int i = 0; i < 8; ++i) {
+        std::string nm = names[i];
+        if (s.compare(0, nm.size(), nm) == 0) {
+            consumed = static_cast<int>(nm.size());
+            return i == 7 ? 7 : i + 1;
+        }
+    }
+    return 0;
+}
+
+// 本周（或下周）周 wd（1=周一..7=周日）的日期；本周已过去则顺延到下周
+static std::string weekday_date(const std::string& today, int wd, bool nextWeek) {
+    int y = 0, m = 0, d = 0;
+    std::sscanf(today.c_str(), "%d-%d-%d", &y, &m, &d);
+    long todayDays = days_from_civil(y, m, d);
+    int dow = static_cast<int>((todayDays + 3) % 7) + 1;   // 周一=1（1970-01-01 为周四）
+    long target = todayDays - (dow - 1) + (wd - 1) + (nextWeek ? 7 : 0);
+    if (!nextWeek && target < todayDays) target += 7;
+    return iso_from_days(target);
+}
+
+// 尝试解析时间 → HH:MM；支持 9:30 / 9点30 / 9点 / 上午9点 / 下午3点 / 晚上8点半 / 14:05
+static bool try_time(const std::string& in, std::string& out) {
+    std::string s = in;
+    int add12 = 0;
+    if (has_prefix(s, "下午") || has_prefix(s, "晚上") || has_prefix(s, "傍晚") ||
+        has_prefix(s, "夜里")) { add12 = 12; s = s.substr(6); }
+    else if (has_prefix(s, "中午")) { add12 = 12; s = s.substr(6); }
+    else if (has_prefix(s, "上午") || has_prefix(s, "早上") || has_prefix(s, "早晨") ||
+             has_prefix(s, "清晨") || has_prefix(s, "凌晨")) { s = s.substr(6); }
+    s = replace_all_str(s, "：", ":");
+    // 「X点半」→ 30 分
+    size_t ban = s.find("半");
+    if (ban != std::string::npos) {
+        s = s.substr(0, ban) + "30";
+        int h = -1;
+        if (std::sscanf(s.c_str(), "%d点", &h) == 1) {
+            if (h >= 0 && h <= 23) {
+                if (add12 && h < 12) h += 12;
+                char buf[8];
+                std::snprintf(buf, sizeof buf, "%02d:30", h);
+                out = buf;
+                return true;
+            }
+        }
+        return false;
+    }
+    int h = -1, m = 0;
+    if (s.find(':') != std::string::npos) {
+        if (std::sscanf(s.c_str(), "%d:%d", &h, &m) != 2) return false;
+    } else if (s.find("点") != std::string::npos || s.find("时") != std::string::npos) {
+        if (std::sscanf(s.c_str(), "%d点%d", &h, &m) != 2 &&
+            std::sscanf(s.c_str(), "%d时%d", &h, &m) != 2) {
+            m = 0;
+            if (std::sscanf(s.c_str(), "%d点", &h) != 1 &&
+                std::sscanf(s.c_str(), "%d时", &h) != 1) return false;
+        }
+    } else {
+        return false;
+    }
+    if (h < 0 || h > 23 || m < 0 || m > 59) return false;
+    if (add12 && h < 12) h += 12;
+    char buf[8];
+    std::snprintf(buf, sizeof buf, "%02d:%02d", h, m);
+    out = buf;
+    return true;
+}
+
+// 尝试从 token 头部解析日期；成功则返回日期并把 tok 缩减为剩余部分
+static std::string try_date(std::string& tok, const std::string& today) {
+    int ty = 0, tm_ = 0, td_ = 0;
+    std::sscanf(today.c_str(), "%d-%d-%d", &ty, &tm_, &td_);
+    std::string date;
+    size_t used = 0;
+
+    // N天后
+    if (tok.size() > 6 && has_suffix(tok, "天后")) {
+        int n = parse_cn_int(tok.substr(0, tok.size() - 6));
+        if (n > 0 && n <= 3650) {
+            date = lunar::add_days_iso(today, n);
+            tok.clear();
+            return date;
+        }
+    }
+    if (has_prefix(tok, "大后天")) { date = lunar::add_days_iso(today, 3); used = 9; }
+    else if (has_prefix(tok, "后天")) { date = lunar::add_days_iso(today, 2); used = 6; }
+    else if (has_prefix(tok, "明天")) { date = lunar::add_days_iso(today, 1); used = 6; }
+    else if (has_prefix(tok, "今天")) { date = today; used = 6; }
+    else if (has_prefix(tok, "下周") || has_prefix(tok, "本周") || has_prefix(tok, "这周")) {
+        int cu = 0;
+        int wd = parse_weekday_str(tok.substr(6), cu);
+        if (wd) { date = weekday_date(today, wd, has_prefix(tok, "下周")); used = 6 + cu; }
+    } else if (has_prefix(tok, "周") || has_prefix(tok, "星期") || has_prefix(tok, "礼拜")) {
+        size_t off = (has_prefix(tok, "星期") || has_prefix(tok, "礼拜")) ? 6 : 3;
+        int cu = 0;
+        int wd = parse_weekday_str(tok.substr(off), cu);
+        if (wd) { date = weekday_date(today, wd, false); used = off + cu; }
+    } else {
+        // M月D日 / M月D号（可带后续时间，如「8月26日上午10点」）
+        int m2 = 0, d2 = 0, n = 0;
+        if (std::sscanf(tok.c_str(), "%d月%d日%n", &m2, &d2, &n) == 2 && n > 0) used = static_cast<size_t>(n);
+        else if (std::sscanf(tok.c_str(), "%d月%d号%n", &m2, &d2, &n) == 2 && n > 0) used = static_cast<size_t>(n);
+        if (used) {
+            if (m2 < 1 || m2 > 12 || d2 < 1 || d2 > 31) {
+                used = 0;
+            } else {
+                // 早于今天 180 天以上 → 视为明年
+                if (days_from_civil(ty, m2, d2) < days_from_civil(ty, tm_, td_) - 180)
+                    date = fmt_iso(ty + 1, m2, d2);
+                else
+                    date = fmt_iso(ty, m2, d2);
+            }
+        }
+        if (!used) {
+            // 整个 token 恰为 YYYY-MM-DD 或 MM-DD
+            int y2 = 0;
+            if (std::sscanf(tok.c_str(), "%d-%d-%d", &y2, &m2, &d2) == 3 &&
+                y2 >= 1900 && y2 <= 2099 && m2 >= 1 && m2 <= 12 && d2 >= 1 && d2 <= 31) {
+                date = fmt_iso(y2, m2, d2);
+                used = tok.size();
+            } else if (std::sscanf(tok.c_str(), "%d-%d", &m2, &d2) == 2 &&
+                       m2 >= 1 && m2 <= 12 && d2 >= 1 && d2 <= 31 &&
+                       tok.find_first_not_of("0123456789-") == std::string::npos) {
+                if (days_from_civil(ty, m2, d2) < days_from_civil(ty, tm_, td_) - 180)
+                    date = fmt_iso(ty + 1, m2, d2);
+                else
+                    date = fmt_iso(ty, m2, d2);
+                used = tok.size();
+            }
+        }
+    }
+    if (used) tok = tok.substr(std::min(used, tok.size()));
+    return date;
+}
+
+static QuickParse quick_parse(const std::string& text) {
+    QuickParse r;
+    std::string today = lunar::today_iso();
+    std::istringstream ss(text);
+    std::string tok;
+    std::vector<std::string> titleParts;
+    while (ss >> tok) {
+        if (tok.size() > 1 && tok[0] == '#') { r.tags.push_back(tok.substr(1)); continue; }
+        if (tok.size() > 1 && tok[0] == '!') {
+            std::string v = tok.substr(1);
+            if (v == "高" || v == "high" || v == "2" || v == "!!") r.priority = 2;
+            else if (v == "低" || v == "low" || v == "0") r.priority = 0;
+            else r.priority = 1;
+            continue;
+        }
+        if (tok.size() > 1 && tok[0] == '/') { r.projectName = tok.substr(1); continue; }
+        // 组合：日期前缀（可带时间后缀）
+        {
+            std::string rest = tok;
+            std::string date = try_date(rest, today);
+            if (!date.empty()) {
+                r.dueDate = date;
+                std::string tm;
+                if (!rest.empty()) {
+                    if (try_time(rest, tm)) r.remindTime = tm;
+                    else titleParts.push_back(rest);
+                }
+                continue;
+            }
+        }
+        // 纯时间
+        {
+            std::string tm;
+            if (try_time(tok, tm)) { r.remindTime = tm; continue; }
+        }
+        titleParts.push_back(tok);
+    }
+    for (size_t i = 0; i < titleParts.size(); ++i) {
+        if (i) r.title += " ";
+        r.title += titleParts[i];
+    }
+    return r;
 }
 
 } // namespace
@@ -354,6 +819,19 @@ void Api::register_routes(HttpServer& srv) {
     srv.on("POST", "/api/backups", [this](const HttpRequest& r) { return handle_backups(r); });
     srv.on("POST", "/api/holidays/auto", [this](const HttpRequest& r) { return handle_holidays_auto(r); });
     srv.on("GET", "/api/digest", [this](const HttpRequest& r) { return handle_digest(r); });
+    // ---- 第二批功能 ----
+    srv.on("POST", "/api/quick-add", [this](const HttpRequest& r) { return handle_quick_add(r); });
+    srv.on("GET", "/api/templates", [this](const HttpRequest& r) { return handle_templates(r); });
+    srv.on("POST", "/api/templates", [this](const HttpRequest& r) { return handle_templates(r); });
+    srv.on("DELETE", "/api/templates/*", [this](const HttpRequest& r) { return handle_template_detail(r); });
+    srv.on("POST", "/api/templates/*", [this](const HttpRequest& r) { return handle_template_detail(r); });
+    srv.on("GET", "/api/heatmap", [this](const HttpRequest& r) { return handle_heatmap(r); });
+    // ---- 批次 B/C 功能 ----
+    srv.on("POST", "/api/undo", [this](const HttpRequest& r) { return handle_undo(r); });
+    srv.on("GET", "/api/undo", [this](const HttpRequest& r) { return handle_undo(r); });
+    srv.on("POST", "/api/repeat-preview", [this](const HttpRequest& r) { return handle_repeat_preview(r); });
+    srv.on("GET", "/api/day", [this](const HttpRequest& r) { return handle_day(r); });
+    srv.on("POST", "/api/sync", [this](const HttpRequest& r) { return handle_sync(r); });
 }
 
 // 从 /api/tasks/123 这类路径中取 id（由 handler 传 0 占位后解析）
@@ -574,12 +1052,17 @@ HttpResponse Api::handle_task_update(const HttpRequest& req, long long id) {
 HttpResponse Api::handle_task_delete(const HttpRequest& req, long long) {
     long long id = path_id(req, 2);
     if (id <= 0) return HttpResponse::json(404, error_json("任务不存在").dump());
+    auto row = db_.query_one("SELECT title FROM tasks WHERE id=?", {std::to_string(id)});
+    if (!row) return HttpResponse::json(404, error_json("任务不存在").dump());
+    Json before = task_snapshot_json(db_, id);
     if (req.q("purge") == "1") {
         db_.exec("DELETE FROM tasks WHERE id=" + std::to_string(id));
+        record_undo(db_, "purge", id, before, 0, row->get("title"));
     } else {
         // 软删除 → 回收站（30 天后启动时自动清理）
         db_.exec("UPDATE tasks SET deleted_at=" + qstr(now_local()) +
                  ", updated_at=datetime('now','localtime') WHERE id=" + std::to_string(id));
+        record_undo(db_, "delete", id, before, 0, row->get("title"));
     }
     Json resp = Json::object();
     resp["ok"] = true;
@@ -591,10 +1074,12 @@ HttpResponse Api::handle_task_delete(const HttpRequest& req, long long) {
 HttpResponse Api::handle_task_restore(const HttpRequest& req, long long) {
     long long id = path_id(req, 2);
     if (id <= 0) return HttpResponse::json(404, error_json("任务不存在").dump());
-    if (db_.query_one("SELECT 1 FROM tasks WHERE id=?", {std::to_string(id)}).has_value() == false)
-        return HttpResponse::json(404, error_json("任务不存在").dump());
+    auto row = db_.query_one("SELECT title FROM tasks WHERE id=?", {std::to_string(id)});
+    if (!row) return HttpResponse::json(404, error_json("任务不存在").dump());
+    Json before = task_snapshot_json(db_, id);
     db_.exec("UPDATE tasks SET deleted_at=NULL, updated_at=datetime('now','localtime') "
              "WHERE id=" + std::to_string(id));
+    record_undo(db_, "restore", id, before, 0, row->get("title"));
     Json resp = Json::object();
     resp["ok"] = true;
     resp["task"] = task_full_json(db_, id);
@@ -817,11 +1302,21 @@ HttpResponse Api::handle_stats(const HttpRequest& req) {
     return HttpResponse::json(200, resp.dump());
 }
 
-// 导出下载：?format=todotxt|json|csv
+// 导出下载：?format=todotxt|json|csv|backup（backup = 多端同步全量快照）
 HttpResponse Api::handle_export(const HttpRequest& req) {
     std::string format = req.q("format", "todotxt");
+    if (format == "backup") {
+        Json j = build_full_snapshot(db_);
+        HttpResponse r;
+        r.status = 200;
+        r.content_type = "application/json; charset=utf-8";
+        r.body = j.dump();
+        r.headers["Content-Disposition"] =
+            "attachment; filename=\"todo-backup-" + today_str_for_file() + ".json\"";
+        return r;
+    }
     if (format != "todotxt" && format != "json" && format != "csv")
-        return HttpResponse::json(400, error_json("format 应为 todotxt|json|csv").dump());
+        return HttpResponse::json(400, error_json("format 应为 todotxt|json|csv|backup").dump());
     std::string data = exporter::export_tasks(db_, format);
     HttpResponse r;
     r.status = 200;
@@ -906,12 +1401,178 @@ HttpResponse Api::handle_digest(const HttpRequest& req) {
     return HttpResponse::json(200, resp.dump());
 }
 
+// 自然语言快速录入；?preview=1 仅解析不落库
+HttpResponse Api::handle_quick_add(const HttpRequest& req) {
+    Json body;
+    try { body = Json::parse(req.body); }
+    catch (...) { return HttpResponse::json(400, error_json("JSON 解析失败").dump()); }
+    std::string text = body["text"].as_string_or("");
+    if (text.empty()) return HttpResponse::json(400, error_json("text 不能为空").dump());
+
+    QuickParse qp = quick_parse(text);
+    if (qp.title.empty()) return HttpResponse::json(400, error_json("未能解析出任务标题").dump());
+
+    // 项目解析：按名称匹配已有项目（找不到则忽略）
+    long long pid = 0;
+    bool projMatched = false;
+    if (!qp.projectName.empty()) {
+        if (auto p = db_.query_one("SELECT id FROM projects WHERE name=?", {qp.projectName})) {
+            pid = p->get_int("id");
+            projMatched = true;
+        }
+    }
+
+    Json parsed = Json::object();
+    parsed["title"] = qp.title;
+    parsed["priority"] = qp.priority < 0 ? 1 : qp.priority;
+    parsed["dueDate"] = qp.dueDate;
+    parsed["remindTime"] = qp.remindTime;
+    parsed["tags"] = Json::array();
+    for (auto& t : qp.tags) parsed["tags"].push_back(Json(t));
+    parsed["project"] = qp.projectName;
+    parsed["projectMatched"] = projMatched;
+
+    if (req.q("preview") == "1") {
+        Json resp = Json::object();
+        resp["ok"] = true;
+        resp["parsed"] = parsed;
+        return HttpResponse::json(200, resp.dump());
+    }
+
+    Json tb = Json::object();
+    tb["title"] = qp.title;
+    if (qp.priority >= 0) tb["priority"] = static_cast<long long>(qp.priority);
+    if (!qp.dueDate.empty()) tb["dueDate"] = qp.dueDate;
+    if (!qp.remindTime.empty()) {
+        tb["remindTime"] = qp.remindTime;
+        tb["hasReminder"] = true;
+    }
+    if (pid) tb["projectId"] = pid;
+    if (!qp.tags.empty()) {
+        Json tags = Json::array();
+        for (auto& t : qp.tags) tags.push_back(Json(t));
+        tb["tags"] = tags;
+    }
+    bool ok = false;
+    std::string err;
+    Json task = apply_task_body(db_, tb, 0, ok, err);
+    if (!ok) return HttpResponse::json(400, error_json(err).dump());
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["task"] = task;
+    resp["parsed"] = parsed;
+    return HttpResponse::json(201, resp.dump());
+}
+
+// 模板：GET 列表 / POST 保存
+HttpResponse Api::handle_templates(const HttpRequest& req) {
+    if (req.method == "POST") {
+        Json body;
+        try { body = Json::parse(req.body); }
+        catch (...) { return HttpResponse::json(400, error_json("JSON 解析失败").dump()); }
+        Json tb = body["body"];
+        if (!tb.is_object() || tb["title"].as_string_or("").empty())
+            return HttpResponse::json(400, error_json("body.title 不能为空").dump());
+        std::string name = body["name"].as_string_or("");
+        if (name.empty()) name = tb["title"].as_string_or("");
+        db_.exec("INSERT INTO templates(name,body) VALUES(" + qstr(name) + "," + qstr(tb.dump()) + ")");
+        Json resp = Json::object();
+        resp["ok"] = true;
+        resp["id"] = db_.last_insert_rowid();
+        resp["name"] = name;
+        return HttpResponse::json(201, resp.dump());
+    }
+    Json arr = Json::array();
+    for (auto& r : db_.query("SELECT * FROM templates ORDER BY id DESC")) {
+        Json j = Json::object();
+        j["id"] = r.get_int("id");
+        j["name"] = r.get("name");
+        try { j["body"] = Json::parse(r.get("body")); }
+        catch (...) { j["body"] = Json::object(); }
+        j["createdAt"] = r.get("created_at");
+        arr.push_back(j);
+    }
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["count"] = static_cast<long long>(arr.size());
+    resp["templates"] = arr;
+    return HttpResponse::json(200, resp.dump());
+}
+
+// 模板详情：DELETE 删除 / POST /api/templates/{id}/apply 实例化为任务
+HttpResponse Api::handle_template_detail(const HttpRequest& req) {
+    long long id = path_id(req, 2);
+    if (id <= 0) return HttpResponse::json(404, error_json("模板不存在").dump());
+    auto row = db_.query_one("SELECT * FROM templates WHERE id=" + std::to_string(id));
+    if (!row) return HttpResponse::json(404, error_json("模板不存在").dump());
+    if (req.method == "DELETE") {
+        db_.exec("DELETE FROM templates WHERE id=" + std::to_string(id));
+        Json resp = Json::object();
+        resp["ok"] = true;
+        return HttpResponse::json(200, resp.dump());
+    }
+    // POST → 实例化
+    Json body;
+    try { body = Json::parse(row->get("body")); }
+    catch (...) { return HttpResponse::json(500, error_json("模板数据损坏").dump()); }
+    if (!body.is_object()) return HttpResponse::json(500, error_json("模板数据损坏").dump());
+    // 相对天数 → 实际日期（每次使用模板时按当天换算）
+    std::string today = lunar::today_iso();
+    if (body["dueOffsetDays"].is_number())
+        body["dueDate"] = lunar::add_days_iso(today, static_cast<int>(body["dueOffsetDays"].as_int()));
+    if (body["startOffsetDays"].is_number())
+        body["startDate"] = lunar::add_days_iso(today, static_cast<int>(body["startOffsetDays"].as_int()));
+    bool ok = false;
+    std::string err;
+    Json task = apply_task_body(db_, body, 0, ok, err);
+    if (!ok) return HttpResponse::json(400, error_json(err).dump());
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["task"] = task;
+    return HttpResponse::json(201, resp.dump());
+}
+
+// 年度完成热力图：?year= 缺省今年
+HttpResponse Api::handle_heatmap(const HttpRequest& req) {
+    std::string today = lunar::today_iso();
+    int year = std::atoi(req.q("year", today.substr(0, 4)).c_str());
+    if (year < 1900 || year > 2100)
+        return HttpResponse::json(400, error_json("年份应在 1900-2100").dump());
+    char buf[8];
+    std::snprintf(buf, sizeof buf, "%04d", year);
+    std::string from = std::string(buf) + "-01-01";
+    std::snprintf(buf, sizeof buf, "%04d", year + 1);
+    std::string to = std::string(buf) + "-01-01";
+    Json days = Json::array();
+    long long maxc = 0, total = 0;
+    for (auto& r : db_.query(
+             "SELECT substr(completed_at,1,10) d, COUNT(*) c FROM tasks "
+             "WHERE deleted_at IS NULL AND status='done' AND completed_at IS NOT NULL "
+             "AND completed_at>=" + qstr(from) + " AND completed_at<" + qstr(to) + " GROUP BY d")) {
+        Json d = Json::object();
+        d["date"] = r.get("d");
+        d["count"] = r.get_int("c");
+        if (r.get_int("c") > maxc) maxc = r.get_int("c");
+        total += r.get_int("c");
+        days.push_back(d);
+    }
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["year"] = static_cast<long long>(year);
+    resp["days"] = days;
+    resp["max"] = maxc;
+    resp["total"] = total;
+    return HttpResponse::json(200, resp.dump());
+}
+
 HttpResponse Api::handle_task_complete(const HttpRequest& req, long long id) {
     auto row = db_.query_one("SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL", {std::to_string(id)});
     if (!row) return HttpResponse::json(404, error_json("任务不存在").dump());
+    Json undo_before = task_snapshot_json(db_, id);
     db_.exec("UPDATE tasks SET status='done', completed_at=" + qstr(now_local()) +
              " WHERE id=" + std::to_string(id));
     Json created = Json::object();
+    long long next_id = 0;
     // 重复任务：生成下一次实例
     std::string rr = row->get("repeat_rule");
     if (!rr.empty()) {
@@ -953,11 +1614,16 @@ HttpResponse Api::handle_task_complete(const HttpRequest& req, long long id) {
                     bool ok = false;
                     std::string err;
                     Json nj = apply_task_body(db_, body, 0, ok, err);
-                    if (ok) created = nj;
+                    if (ok) {
+                        created = nj;
+                        next_id = nj["id"].as_int_or(0);
+                    }
                 }
             }
         } catch (...) {}
     }
+    // 撤销埋点：完成 → 撤销即恢复完成前状态（下一实例由其自身的 create 记录单独撤销）
+    record_undo(db_, "complete", id, undo_before, next_id, row->get("title"));
     Json resp = Json::object();
     resp["ok"] = true;
     resp["nextInstance"] = created;
@@ -965,10 +1631,12 @@ HttpResponse Api::handle_task_complete(const HttpRequest& req, long long id) {
 }
 
 HttpResponse Api::handle_task_reopen(const HttpRequest& req, long long id) {
-    if (db_.query_one("SELECT 1 FROM tasks WHERE id=?", {std::to_string(id)}).has_value() == false)
-        return HttpResponse::json(404, error_json("任务不存在").dump());
+    auto row = db_.query_one("SELECT title FROM tasks WHERE id=?", {std::to_string(id)});
+    if (!row) return HttpResponse::json(404, error_json("任务不存在").dump());
+    Json before = task_snapshot_json(db_, id);
     db_.exec("UPDATE tasks SET status='todo', completed_at=NULL WHERE id=" +
              std::to_string(id));
+    record_undo(db_, "reopen", id, before, 0, row->get("title"));
     Json resp = Json::object();
     resp["ok"] = true;
     return HttpResponse::json(200, resp.dump());
@@ -1449,5 +2117,410 @@ HttpResponse Api::handle_search(const HttpRequest& req) {
     Json resp = Json::object();
     resp["ok"] = true;
     resp["tasks"] = arr;
+    return HttpResponse::json(200, resp.dump());
+}
+
+// ==================== 批次 B/C：撤销 / 重复预览 / 日视图 / 同步 ====================
+
+namespace {
+
+const char* undo_action_name(const std::string& action) {
+    if (action == "create") return "创建";
+    if (action == "update") return "更新";
+    if (action == "delete") return "删除";
+    if (action == "purge") return "彻底删除";
+    if (action == "complete") return "完成";
+    if (action == "reopen") return "重新打开";
+    if (action == "restore") return "恢复";
+    return "操作";
+}
+
+} // namespace
+
+HttpResponse Api::handle_undo(const HttpRequest& req) {
+    auto row = db_.query_one("SELECT * FROM undo_log ORDER BY id DESC LIMIT 1");
+    if (req.method == "GET") {
+        Json resp = Json::object();
+        resp["ok"] = true;
+        resp["canUndo"] = row.has_value();
+        if (row) {
+            resp["action"] = row->get("action");
+            resp["actionName"] = undo_action_name(row->get("action"));
+            resp["label"] = row->get("label");
+            resp["taskId"] = row->get_int("task_id");
+        }
+        return HttpResponse::json(200, resp.dump());
+    }
+    // POST：执行撤销
+    if (!row)
+        return HttpResponse::json(404, error_json("没有可撤销的操作").dump());
+    std::string action = row->get("action");
+    long long task_id = row->get_int("task_id");
+    long long after_id = row->get_int("after_id");
+    std::string label = row->get("label");
+    Json payload;
+    try { payload = Json::parse(row->get("payload")); }
+    catch (...) { payload = Json::object(); }
+    Json before = payload["before"];
+
+    try {
+        if (action == "create") {
+            // 撤销创建 = 删除刚创建的任务（级联清理标签/依赖）
+            if (after_id > 0)
+                db_.exec("DELETE FROM tasks WHERE id=" + std::to_string(after_id));
+        } else if (action == "complete") {
+            // 撤销完成 = 删除自动生成的下一实例（含其 create 撤销记录），再恢复完成前快照
+            if (after_id > 0) {
+                db_.exec("DELETE FROM tasks WHERE id=" + std::to_string(after_id));
+                db_.exec("DELETE FROM undo_log WHERE action='create' AND after_id=" +
+                         std::to_string(after_id));
+            }
+            restore_task_from_snapshot(db_, before);
+        } else if (action == "update" || action == "delete" || action == "purge" ||
+                   action == "reopen" || action == "restore") {
+            // 其余操作 = 恢复操作前快照
+            restore_task_from_snapshot(db_, before);
+        } else {
+            return HttpResponse::json(400, error_json("未知的撤销类型: " + action).dump());
+        }
+        db_.exec("DELETE FROM undo_log WHERE id=" + std::to_string(row->get_int("id")));
+    } catch (const std::exception& e) {
+        return HttpResponse::json(500, error_json(std::string("撤销失败: ") + e.what()).dump());
+    }
+
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["action"] = action;
+    resp["taskId"] = action == "create" ? after_id : task_id;
+    resp["desc"] = std::string("已撤销") + undo_action_name(action) +
+                   (label.empty() ? "" : "：" + label);
+    return HttpResponse::json(200, resp.dump());
+}
+
+HttpResponse Api::handle_repeat_preview(const HttpRequest& req) {
+    Json body;
+    try { body = Json::parse(req.body); }
+    catch (...) { return HttpResponse::json(400, error_json("JSON 解析失败").dump()); }
+    RepeatRule rule = RepeatRule::from_json(body["rule"]);
+    if (!rule.enabled())
+        return HttpResponse::json(400, error_json("重复规则无效").dump());
+    std::string cur = body["from"].as_string_or(lunar::today_iso());
+    int count = static_cast<int>(body["count"].as_int_or(5));
+    if (count < 1) count = 1;
+    if (count > 20) count = 20;
+    HolidayChecker hc(db_);
+    Json dates = Json::array();
+    for (int i = 0; i < count; ++i) {
+        std::string next = recurrence::next_after(rule, cur, hc);
+        if (next.empty()) break;
+        if (!rule.end_date.empty() && next > rule.end_date) break;
+        dates.push_back(next);
+        cur = next;
+    }
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["dates"] = dates;
+    resp["rule"] = rule.to_json();
+    return HttpResponse::json(200, resp.dump());
+}
+
+// 日视图条目精简 JSON（供时间块渲染）
+Json day_entry_json(Db& db, const Db::Row& r, bool virtual_instance) {
+    Json j = Json::object();
+    j["id"] = r.get_int("id");
+    j["title"] = r.get("title");
+    j["priority"] = r.get_int("priority");
+    j["status"] = r.get("status");
+    j["remindTime"] = r.get("remind_time");
+    j["dueDate"] = r.get("due_date");
+    j["lunarRemind"] = r.get_int("lunar_remind") != 0;
+    j["lunarDate"] = r.get("lunar_date");
+    j["virtual"] = virtual_instance;
+    j["repeat"] = !r.get("repeat_rule").empty();
+    Json tags = Json::array();
+    for (auto& t : db.query(
+             "SELECT t.name FROM tags t JOIN task_tags tt ON t.id=tt.tag_id "
+             "WHERE tt.task_id=? ORDER BY t.name", {r.get("id")}))
+        tags.push_back(t.get("name"));
+    j["tags"] = tags;
+    long long pid = r.get_int("project_id");
+    if (pid) {
+        if (auto p = db.query_one("SELECT name,color FROM projects WHERE id=?",
+                                  {std::to_string(pid)})) {
+            j["projectName"] = p->get("name");
+            j["projectColor"] = p->get("color", "#4A90D9");
+        }
+    }
+    return j;
+}
+
+HttpResponse Api::handle_day(const HttpRequest& req) {
+    std::string date = req.q("date", lunar::today_iso());
+    int y = 0, m = 0, d = 0;
+    if (std::sscanf(date.c_str(), "%d-%d-%d", &y, &m, &d) != 3 || y < 1901 || y > 2099)
+        return HttpResponse::json(400, error_json("日期格式应为 YYYY-MM-DD").dump());
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%04d-%02d-%02d", y, m, d);
+    date = buf;
+
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["date"] = date;
+    // 农历与节假日信息
+    LunarDate ld = lunar::solar_to_lunar(y, m, d);
+    resp["lunarText"] = ld.chinese;
+    resp["term"] = lunar::solar_term(y, m, d);
+    std::string hol = lunar::statutory_holiday(y, m, d);
+    bool isHol = !hol.empty() ||
+                 db_.query_one("SELECT 1 FROM holidays WHERE date=?", {date}).has_value();
+    if (hol.empty() && isHol) hol = "节假日";
+    resp["holidayName"] = hol;
+    resp["isHoliday"] = isHol;
+    resp["weekday"] = static_cast<long long>(lunar::weekday_of_iso(date));
+
+    Json timed = Json::array();
+    Json allday = Json::array();
+    Json done = Json::array();
+    std::set<long long> added;
+
+    // 当日到期/开始的普通任务
+    for (auto& r : db_.query(
+             "SELECT * FROM tasks WHERE deleted_at IS NULL AND status!='done' AND "
+             "(due_date=? OR (due_date IS NULL AND start_date=?)) ORDER BY remind_time, id",
+             {date, date})) {
+        bool has_time = !r.get("remind_time").empty();
+        (has_time ? timed : allday).push_back(day_entry_json(db_, r, false));
+        added.insert(r.get_int("id"));
+    }
+
+    // 已完成：当日到期或当日完成
+    for (auto& r : db_.query(
+             "SELECT * FROM tasks WHERE deleted_at IS NULL AND status='done' AND "
+             "(due_date=? OR completed_at LIKE ?) ORDER BY completed_at DESC, id",
+             {date, date + "%"})) {
+        Json j = day_entry_json(db_, r, false);
+        j["completedAt"] = r.get("completed_at");
+        done.push_back(j);
+        added.insert(r.get_int("id"));
+    }
+
+    // 重复任务的虚拟实例（规则命中当日且本体不在当日）
+    HolidayChecker hc(db_);
+    for (auto& r : db_.query(
+             "SELECT * FROM tasks WHERE deleted_at IS NULL AND status!='done' AND "
+             "repeat_rule!='' ORDER BY id")) {
+        if (added.count(r.get_int("id"))) continue;
+        std::string rr = r.get("repeat_rule");
+        try {
+            RepeatRule rule = RepeatRule::from_json_str(rr);
+            if (!rule.enabled()) continue;
+            auto occ = recurrence::occurrences_in_range(rule, date, date, hc);
+            if (occ.empty() || occ.front() != date) continue;
+            if (r.get("due_date") == date) continue;   // 本体已计入
+            bool has_time = !r.get("remind_time").empty();
+            (has_time ? timed : allday).push_back(day_entry_json(db_, r, true));
+            added.insert(r.get_int("id"));
+        } catch (...) {}
+    }
+
+    // 农历提醒的虚拟实例
+    for (auto& r : db_.query(
+             "SELECT * FROM tasks WHERE deleted_at IS NULL AND status!='done' AND "
+             "lunar_remind=1 AND lunar_date IS NOT NULL AND lunar_date!='' ORDER BY id")) {
+        if (added.count(r.get_int("id"))) continue;
+        if (r.get("lunar_date") != std::to_string(ld.month) + "-" + std::to_string(ld.day))
+            continue;
+        bool has_time = !r.get("remind_time").empty();
+        Json j = day_entry_json(db_, r, true);
+        j["lunarInstance"] = true;
+        (has_time ? timed : allday).push_back(j);
+        added.insert(r.get_int("id"));
+    }
+
+    resp["timed"] = timed;
+    resp["allday"] = allday;
+    resp["done"] = done;
+    return HttpResponse::json(200, resp.dump());
+}
+
+HttpResponse Api::handle_sync(const HttpRequest& req) {
+    Json snap;
+    try { snap = Json::parse(req.body); }
+    catch (...) { return HttpResponse::json(400, error_json("JSON 解析失败").dump()); }
+    if (!snap.is_object() || !snap["tasks"].is_array() ||
+        snap.get_str("app") != "cpp-todo")
+        return HttpResponse::json(400, error_json("无效的同步快照（应为 /api/export?format=backup 导出文件）").dump());
+
+    long long newTasks = 0, updatedTasks = 0, newProjects = 0, newTags = 0;
+    std::set<long long> touched;   // 被写入的任务（第二趟修复 parent/标签/依赖）
+    try {
+        db_.begin();
+
+        // 1. 项目：按名称映射，缺失则创建
+        std::map<long long, long long> pmap;
+        if (snap["projects"].is_array()) {
+            for (auto& p : snap["projects"]) {
+                std::string name = p["name"].as_string_or("");
+                if (name.empty()) continue;
+                auto row = db_.query_one("SELECT id FROM projects WHERE name=?", {name});
+                long long lid;
+                if (row) {
+                    lid = row->get_int("id");
+                } else {
+                    db_.exec("INSERT INTO projects(name,color,is_folder,sort_order) VALUES(" +
+                             qstr(name) + "," + qstr(p["color"].as_string_or("#4A90D9")) +
+                             "," + (p["isFolder"].as_bool_or(false) ? "1" : "0") + "," +
+                             std::to_string(p["sortOrder"].as_int_or(0)) + ")");
+                    lid = db_.last_insert_rowid();
+                    ++newProjects;
+                }
+                pmap[p["id"].as_int_or(0)] = lid;
+            }
+        }
+
+        // 2. 标签：按名称，缺失则创建
+        if (snap["tags"].is_array()) {
+            for (auto& t : snap["tags"]) {
+                std::string name = t["name"].as_string_or("");
+                if (name.empty()) continue;
+                if (!db_.query_one("SELECT 1 FROM tags WHERE name=?", {name}).has_value()) {
+                    db_.exec("INSERT INTO tags(name,color) VALUES(" + qstr(name) + "," +
+                             qstr(t["color"].as_string_or("#8E8E93")) + ")");
+                    ++newTags;
+                }
+            }
+        }
+
+        // 3. 任务第一趟：按 id 对齐；存在则 updated_at 新者胜，不存在则按原 id 插入
+        for (auto& tk : snap["tasks"]) {
+            long long rid = tk["id"].as_int_or(0);
+            if (rid <= 0) continue;
+            auto s = [&](const char* k) { return tk[k].as_string_or(""); };
+            auto n = [&](const char* k) { return std::to_string(tk[k].as_int_or(0)); };
+            auto val = [&](const std::string& v) { return v.empty() ? "NULL" : qstr(v); };
+            long long rpid = tk["project_id"].as_int_or(0);
+            long long lpid = pmap.count(rpid) ? pmap[rpid] : 0;
+            std::string proj = lpid ? std::to_string(lpid) : std::string("NULL");
+            std::string fields =
+                "title=" + qstr(s("title")) + ", notes=" + qstr(s("notes")) +
+                ", priority=" + n("priority") +
+                ", start_date=" + val(s("start_date")) + ", due_date=" + val(s("due_date")) +
+                ", remind_time=" + val(s("remind_time")) + ", has_reminder=" + n("has_reminder") +
+                ", lunar_remind=" + n("lunar_remind") + ", lunar_date=" + val(s("lunar_date")) +
+                ", sort_order=" + n("sort_order") + ", status=" + qstr(s("status")) +
+                ", completed_at=" + val(s("completed_at")) + ", pomodoros=" + n("pomodoros") +
+                ", deleted_at=" + val(s("deleted_at")) + ", repeat_rule=" + qstr(s("repeat_rule")) +
+                ", updated_at=" + qstr(s("updated_at"));
+            auto existing = db_.query_one("SELECT updated_at FROM tasks WHERE id=?",
+                                          {std::to_string(rid)});
+            if (existing) {
+                // 远端更新时间更新（或本地为 NULL）才覆盖
+                if (s("updated_at") > existing->get("updated_at")) {
+                    db_.exec("UPDATE tasks SET " + fields + ", project_id=" + proj +
+                             " WHERE id=" + std::to_string(rid));
+                    ++updatedTasks;
+                    touched.insert(rid);
+                }
+            } else {
+                // 按原 id 重建（parent 先置 NULL，第二趟修复）
+                db_.exec("INSERT INTO tasks(id,title,notes,priority,start_date,due_date,"
+                         "remind_time,has_reminder,lunar_remind,lunar_date,project_id,"
+                         "parent_id,sort_order,status,completed_at,pomodoros,deleted_at,"
+                         "repeat_rule,created_at,updated_at) VALUES(" +
+                         std::to_string(rid) + "," + qstr(s("title")) + "," +
+                         qstr(s("notes")) + "," + n("priority") + "," + val(s("start_date")) +
+                         "," + val(s("due_date")) + "," + val(s("remind_time")) + "," +
+                         n("has_reminder") + "," + n("lunar_remind") + "," +
+                         val(s("lunar_date")) + "," + proj + ",NULL," + n("sort_order") + "," +
+                         qstr(s("status")) + "," + val(s("completed_at")) + "," + n("pomodoros") +
+                         "," + val(s("deleted_at")) + "," + qstr(s("repeat_rule")) + "," +
+                         qstr(s("created_at")) + "," + qstr(s("updated_at")) + ")");
+                ++newTasks;
+                touched.insert(rid);
+            }
+        }
+
+        // 4. 任务第二趟：parent_id / 标签 / 依赖（仅对刚写入的任务）
+        for (auto& tk : snap["tasks"]) {
+            long long rid = tk["id"].as_int_or(0);
+            if (rid <= 0 || !touched.count(rid)) continue;
+            long long par = tk["parent_id"].as_int_or(0);
+            if (par > 0 && db_.query_one("SELECT 1 FROM tasks WHERE id=?",
+                                         {std::to_string(par)}).has_value())
+                db_.exec("UPDATE tasks SET parent_id=" + std::to_string(par) +
+                         " WHERE id=" + std::to_string(rid));
+            if (tk["tags"].is_array()) {
+                db_.exec("DELETE FROM task_tags WHERE task_id=" + std::to_string(rid));
+                for (auto& t : tk["tags"]) {
+                    std::string name = t.as_string_or("");
+                    if (name.empty()) continue;
+                    auto row = db_.query_one("SELECT id FROM tags WHERE name=?", {name});
+                    if (!row) continue;
+                    db_.exec("INSERT OR IGNORE INTO task_tags(task_id,tag_id) VALUES(" +
+                             std::to_string(rid) + "," +
+                             std::to_string(row->get_int("id")) + ")");
+                }
+            }
+            if (tk["depends_on"].is_array()) {
+                db_.exec("DELETE FROM task_dependencies WHERE task_id=" + std::to_string(rid));
+                for (auto& d : tk["depends_on"]) {
+                    long long dep = d.as_int_or(0);
+                    if (dep <= 0 || dep == rid) continue;
+                    if (!db_.query_one("SELECT 1 FROM tasks WHERE id=?",
+                                       {std::to_string(dep)}).has_value())
+                        continue;
+                    db_.exec("INSERT OR IGNORE INTO task_dependencies(task_id,depends_on) VALUES(" +
+                             std::to_string(rid) + "," + std::to_string(dep) + ")");
+                }
+            }
+        }
+
+        // 5. 模板 / 筛选 / 节假日：insert-or-ignore
+        if (snap["templates"].is_array()) {
+            for (auto& t : snap["templates"]) {
+                std::string name = t["name"].as_string_or("");
+                std::string body = t["body"].as_string_or("");
+                if (name.empty() || body.empty()) continue;
+                if (!db_.query_one("SELECT 1 FROM templates WHERE name=? AND body=?",
+                                   {name, body}).has_value())
+                    db_.exec("INSERT INTO templates(name,body) VALUES(" + qstr(name) + "," +
+                             qstr(body) + ")");
+            }
+        }
+        if (snap["filters"].is_array()) {
+            for (auto& f : snap["filters"]) {
+                std::string name = f["name"].as_string_or("");
+                std::string spec = f["spec"].as_string_or("");
+                if (name.empty() || spec.empty()) continue;
+                if (!db_.query_one("SELECT 1 FROM saved_filters WHERE name=? AND spec=?",
+                                   {name, spec}).has_value())
+                    db_.exec("INSERT INTO saved_filters(name,spec) VALUES(" + qstr(name) + "," +
+                             qstr(spec) + ")");
+            }
+        }
+        if (snap["holidays"].is_array()) {
+            for (auto& h : snap["holidays"]) {
+                std::string date = h.as_string_or("");
+                if (date.empty()) continue;
+                db_.exec("INSERT OR IGNORE INTO holidays(date) VALUES(" + qstr(date) + ")");
+            }
+        }
+
+        db_.commit();
+    } catch (const std::exception& e) {
+        try { db_.rollback(); } catch (...) {}
+        return HttpResponse::json(500, error_json(std::string("同步失败: ") + e.what()).dump());
+    }
+
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["newTasks"] = newTasks;
+    resp["updatedTasks"] = updatedTasks;
+    resp["newProjects"] = newProjects;
+    resp["newTags"] = newTags;
+    resp["summary"] = "新增 " + std::to_string(newTasks) + " 个任务，更新 " +
+                      std::to_string(updatedTasks) + " 个任务，新增项目 " +
+                      std::to_string(newProjects) + " 个，新增标签 " +
+                      std::to_string(newTags) + " 个";
     return HttpResponse::json(200, resp.dump());
 }
