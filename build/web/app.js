@@ -18,9 +18,11 @@ function esc(s) {
 function toast(msg, type) {
   const t = document.createElement('div');
   t.className = 'toast' + (type ? ' ' + type : '');
-  t.textContent = msg;
+  var ico = type === 'ok' ? '\u2713 ' : type === 'err' ? '\u26a0 ' : '';
+  t.innerHTML = ico ? '<span class="toast-ico">' + ico.trim() + '</span>' : '';
+  t.appendChild(document.createTextNode(msg));
   $('#toast-root').appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; }, 2600);
+  setTimeout(() => { t.classList.add('toast-out'); }, 2600);
   setTimeout(() => t.remove(), 3000);
 }
 
@@ -87,6 +89,17 @@ async function api(method, path, body) {
 }
 const apiGet = (p) => api('GET', p);
 
+/* 按钮加载态：注入旋转图标，禁用按钮，返回恢复函数 */
+function btnLoading(btn) {
+  var orig = btn.innerHTML;
+  btn.classList.add('is-loading');
+  btn.innerHTML = '<span class="btn-spinner"></span>' + orig;
+  return function() {
+    btn.classList.remove('is-loading');
+    btn.innerHTML = orig;
+  };
+}
+
 /* ---------------- 图标辅助 ---------------- */
 function svgIcon(name, size) {
   size = size || 16;
@@ -113,7 +126,9 @@ const S = {
   batchMode: false,      // 批量选择模式
   batchSel: new Set(),   // 已勾选任务 id
   dragTaskId: null,      // 拖拽中的任务 id
-  heatYear: 0            // 热力图当前年份（0=今年）
+  heatYear: 0,           // 热力图当前年份（0=今年）
+  dayDate: '',           // 日视图当前日期（空=今天）
+  lastNewTaskId: null    // 新建任务后用于触发淡入动画
 };
 
 /* ---------------- 初始化 ---------------- */
@@ -223,24 +238,61 @@ function renderTagCloud() {
 }
 
 /* ---------------- 视图切换 ---------------- */
+
+/* 根据当前视图生成骨架屏 HTML */
+function skeletonHTML(view) {
+  if (view === 'stats') {
+    return '<div class="sk-wrap"><div class="sk-cards">' +
+      Array(5).fill('<div class="sk-statcard"><div class="sk-line mid"></div><div class="sk-line short"></div></div>').join('') +
+      '</div><div class="sk-card" style="padding:16px"><div class="sk-line"></div><div class="sk-line mid"></div><div class="sk-line short"></div></div></div>';
+  }
+  if (view === 'kanban') {
+    return '<div class="kanban">' + Array(3).fill(
+      '<div class="kb-col"><div class="kb-col-head"><span class="sk-line mid" style="margin:0"></span></div><div class="kb-list">' +
+      Array(3).fill('<div class="kb-card" style="pointer-events:none"><div class="sk-line mid"></div><div class="sk-line short"></div></div>').join('') +
+      '</div></div>'
+    ).join('') + '</div>';
+  }
+  if (view === 'calendar') {
+    return '<div class="cal-grid" style="pointer-events:none">' +
+      Array(35).fill('<div class="cal-cell blank" style="min-height:86px"><div class="sk-line short"></div></div>').join('') + '</div>';
+  }
+  // 默认：列表型骨架
+  return '<div class="sk-wrap"><div class="sk-head"><div class="sk-line"></div></div>' +
+    '<div class="sk-card">' + Array(5).fill(
+      '<div class="sk-row"><div class="sk-check sk-line" style="margin:0"></div><div style="flex:1"><div class="sk-line mid"></div><div class="sk-line short"></div></div></div>'
+    ).join('') + '</div></div>';
+}
+
 async function switchView(v) {
   S.view = v;
   $$('#view-nav .nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === v));
   const content = $('#content');
-  content.innerHTML = '';
+  // 骨架屏占位（快速感知加载）
+  content.innerHTML = skeletonHTML(v);
+  // 包装 appendChild：首次追加真实内容时自动清除骨架屏
+  var cleared = false;
+  var origAppend = content.appendChild.bind(content);
+  content.appendChild = function(child) {
+    if (!cleared) { content.innerHTML = ''; cleared = true; content.appendChild = origAppend; }
+    return origAppend(child);
+  };
   try {
     if (v === 'today')     await renderToday(content);
     if (v === 'projects')  await renderProjects(content);
     if (v === 'tags')      await renderTags(content);
     if (v === 'calendar')  await renderCalendar(content);
+    if (v === 'day')       await renderDay(content);
     if (v === 'kanban')    await renderKanban(content);
     if (v === 'filters')   await renderFilters(content);
     if (v === 'stats')     await renderStats(content);
     if (v === 'gantt')     await renderGantt(content);
     if (v === 'trash')     await renderTrash(content);
   } catch (e) {
-    content.innerHTML = '<div class="loading">加载失败：' + esc(e.message) + '</div>';
+    content.innerHTML = '<div class="loading"><span class="spin-ico"></span>加载失败：' + esc(e.message) + '</div>';
   }
+  // 确保 appendChild 已恢复
+  if (!cleared) { content.appendChild = origAppend; }
 }
 
 function viewHead(title, sub, extra) {
@@ -298,6 +350,7 @@ function taskRowHTML(t, depth) {
     '<button class="t-btn" data-act="addsub" data-id="' + t.id + '" title="添加子任务">' + svgIcon('plus', 12) + '</button>' +
     '<button class="t-btn" data-act="edit" data-id="' + t.id + '" title="编辑">✎</button>' +
     '<button class="t-btn" data-act="pomo" data-id="' + t.id + '" title="用番茄钟专注此任务">' + svgIcon('pomodoro', 12) + '</button>' +
+    '<button class="t-btn" data-act="focus" data-id="' + t.id + '" title="专注模式（全屏番茄钟）">' + svgIcon('focus', 12) + '</button>' +
     '<button class="t-btn danger" data-act="del" data-id="' + t.id + '" title="删除">🗑</button>' +
     '</div>';
 
@@ -358,7 +411,7 @@ async function renderToday(content) {
   ]);
   const groups = [
     { key: 'overdue',   title: '已逾期',   badge: 'over', cls: 'b-red',   none: '没有逾期任务' },
-    { key: 'dueToday',  title: '今日到期', badge: '',      cls: 'b-blue',  none: '今日无到期任务' },
+    { key: 'dueToday',  title: '今日到期', badge: '',      cls: 'b-amber', none: '今日无到期任务' },
     { key: 'startToday', title: '今日开始', badge: '',     cls: 'b-green', none: '今日无开始任务' },
     { key: 'noDate',    title: '无日期',   badge: '',      cls: '',        none: '无日期任务都清空了' },
     { key: 'doneToday', title: '今日已完成', badge: data.doneToday.length, cls: 'b-green', none: '今天还没完成任务', muted: true }
@@ -1137,14 +1190,18 @@ function openExportModal() {
   body.innerHTML =
     ['todotxt|☑|Todo.txt|通用纯文本格式，每行一个任务，可被多数工具导入',
      'json|{}|JSON|完整结构化数据，含项目/标签/依赖/重复规则，适合备份',
-     'csv|▤|CSV|表格格式，可用 Excel / Numbers 打开']
+     'csv|▤|CSV|表格格式，可用 Excel / Numbers 打开',
+     'backup|◈|完整备份快照|全量快照（任务+项目+标签+模板+筛选+节假日），可在另一台设备「导入 → 同步合并」']
     .map(s => {
       const [fmt, ico, name, desc] = s.split('|');
       return '<div class="export-item" data-act="export-go" data-fmt="' + fmt + '">' +
         '<span class="ei-ico">' + ico + '</span>' +
         '<div><div class="ei-name">' + name + '</div><div class="ei-desc">' + desc + '</div></div></div>';
-    }).join('');
-  openModal('导出数据', body, null);
+    }).join('') +
+    '<div class="export-item" data-act="sync-open">' +
+    '<span class="ei-ico">' + svgIcon('sync', 16) + '</span>' +
+    '<div><div class="ei-name">同步合并备份</div><div class="ei-desc">把另一台设备导出的备份快照合并进本机（不删除本地数据）</div></div></div>';
+  openModal('导出 / 同步', body, null);
 }
 
 /* ---------------- 快捷键帮助 ---------------- */
@@ -1152,21 +1209,25 @@ function openHelpModal() {
   const body = document.createElement('div');
   body.innerHTML = '<table class="kbd-table">' +
     [['<kbd>⌘K</kbd> / <kbd>Ctrl K</kbd>', '打开命令面板'],
+     ['<kbd>⌘Z</kbd> / <kbd>Ctrl Z</kbd>', '撤销最近一次操作（创建/更新/删除/完成等均可撤销）'],
      ['<kbd>N</kbd>', '新建任务'],
      ['<kbd>Q</kbd>', '聚焦快速录入框（自然语言）'],
      ['<kbd>/</kbd>', '聚焦搜索框'],
      ['<kbd>P</kbd>', '打开 / 收起番茄钟'],
+     ['<kbd>F</kbd>', '进入专注模式（全屏番茄钟，Esc 退出）'],
+     ['<kbd>D</kbd>', '切换到时间块日视图'],
      ['<kbd>T</kbd>', '切换深色 / 浅色主题'],
      ['<kbd>1</kbd> … <kbd>9</kbd>', '切换视图（今日/项目/标签/日历/看板/筛选/统计/甘特/回收站）'],
      ['<kbd>?</kbd>', '显示本帮助'],
-     ['<kbd>Esc</kbd>', '关闭弹窗 / 面板']]
+     ['<kbd>Esc</kbd>', '关闭弹窗 / 面板 / 专注模式']]
     .map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('') +
     '</table>' +
     '<div style="margin-top:12px;font-size:12px;color:var(--text-3)">' +
     '快速录入语法：顶栏输入「明天下午3点 写周报 #工作 !高 /项目名」后回车，自动解析日期/时间/标签/优先级/项目；' +
     '常用任务可在编辑器里「存为模板」，命令面板中一键实例化。' +
     '今日视图支持：批量模式（勾选后批量完成/移动/打标签）、拖拽任务行手动排序；' +
-    '任务行 ' + svgIcon('pomodoro', 12) + ' 按钮可将任务加入番茄钟。</div>';
+    '任务行 ' + svgIcon('pomodoro', 12) + ' 按钮可将任务加入番茄钟，' + svgIcon('focus', 12) + ' 按钮进入全屏专注。' +
+    '日视图点击时间轴空白处可在该时刻新建任务；多台设备间用「导出→完整备份快照 / 同步合并」搬数据。</div>';
   openModal('键盘快捷键', body, null);
 }
 
@@ -1181,6 +1242,10 @@ const PALETTE_CMDS = [
   { ico: svgIcon('stats'), label: '前往：统计', hint: '7', run: () => switchView('stats') },
   { ico: svgIcon('gantt'), label: '前往：甘特图', hint: '8', run: () => switchView('gantt') },
   { ico: svgIcon('trash'), label: '前往：回收站', hint: '9', run: () => switchView('trash') },
+  { ico: svgIcon('day'), label: '前往：日视图（时间块）', hint: 'D', run: () => switchView('day') },
+  { ico: svgIcon('undo'), label: '撤销最近一次操作', hint: '⌘Z', run: () => undoLast() },
+  { ico: svgIcon('focus'), label: '进入专注模式（全屏番茄钟）', hint: 'F', run: () => enterFocusMode() },
+  { ico: svgIcon('sync'), label: '多端同步（合并备份快照）', hint: '', run: () => openSyncModal() },
   { ico: svgIcon('plus'), label: '新建任务', hint: 'N', run: () => openTaskEditor(null) },
   { ico: svgIcon('bolt'), label: '从模板新建任务', hint: '', run: () => openTemplatesModal() },
   { ico: svgIcon('bolt'), label: '快速录入（自然语言）', hint: 'Q', run: () => { const q = $('#quick-input'); if (q) q.focus(); } },
@@ -1228,8 +1293,12 @@ function openPalette() {
 }
 
 function closePalette() {
-  const p = $('#palette-root');
-  if (p) p.remove();
+  var p = $('#palette-root');
+  if (!p) return;
+  if (!p.classList.contains('closing')) {
+    p.classList.add('closing');
+    setTimeout(function() { if (p.parentNode) p.remove(); }, 160);
+  }
 }
 
 async function fillPalette(q) {
@@ -1353,11 +1422,13 @@ function openSaveTemplateModal(payload) {
       if (body2.dueDate) { body2.dueOffsetDays = daysBetween(S.today, body2.dueDate); body2.dueDate = ''; }
       if (body2.startDate) { body2.startOffsetDays = daysBetween(S.today, body2.startDate); body2.startDate = ''; }
     }
+    var restore = btnLoading(btnSave);
     try {
       await api('POST', '/api/templates', { name: name, body: body2 });
-      toast('模板已保存');
+      toast('模板已保存', 'ok');
       closeModal();
     } catch (e) { toast(e.message, 'err'); }
+    finally { restore(); }
   });
   foot.appendChild(btnCancel);
   foot.appendChild(btnSave);
@@ -1469,20 +1540,22 @@ async function pomoTick() {
   renderPomo();
 }
 
+function pomoToggle() {
+  POMO.running = !POMO.running;
+  if (POMO.running && !POMO.timer)
+    POMO.timer = setInterval(pomoTick, 1000);
+  if (!POMO.running && POMO.timer) {
+    clearInterval(POMO.timer);
+    POMO.timer = null;
+  }
+  renderPomo();
+}
+
 function bindPomodoro() {
   $('#pomo-close').addEventListener('click', () => {
     $('#pomo-widget').classList.add('hidden');
   });
-  $('#pomo-start').addEventListener('click', () => {
-    POMO.running = !POMO.running;
-    if (POMO.running && !POMO.timer)
-      POMO.timer = setInterval(pomoTick, 1000);
-    if (!POMO.running && POMO.timer) {
-      clearInterval(POMO.timer);
-      POMO.timer = null;
-    }
-    renderPomo();
-  });
+  $('#pomo-start').addEventListener('click', pomoToggle);
   $('#pomo-reset').addEventListener('click', () => {
     POMO.running = false;
     if (POMO.timer) { clearInterval(POMO.timer); POMO.timer = null; }
@@ -1491,6 +1564,330 @@ function bindPomodoro() {
   });
   $('#pomo-task-select').addEventListener('change', e => {
     POMO.taskId = parseInt(e.target.value, 10) || 0;
+  });
+}
+
+/* ---------------- 撤销系统（Ctrl+Z） ---------------- */
+async function undoLast() {
+  try {
+    const info = await apiGet('/api/undo');
+    if (!info.canUndo) { toast('没有可撤销的操作'); return; }
+    const r = await api('POST', '/api/undo');
+    toast(r.desc || '已撤销', 'ok');
+    await refreshAll();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---------------- 时间块日视图 ---------------- */
+const DAY_HOUR_PX = 44;
+let dayNowTimer = null;
+
+function isoAddDays(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d));
+  t.setUTCDate(t.getUTCDate() + n);
+  return t.toISOString().slice(0, 10);
+}
+
+async function renderDay(content) {
+  const date = S.dayDate || S.today;
+  const data = await apiGet('/api/day?date=' + date);
+  const isToday = date === S.today;
+  const WD = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+
+  const head = viewHead('日视图', '时间块 + 全天 + 已完成');
+  content.appendChild(head);
+
+  // 日期导航条
+  const nav = document.createElement('div');
+  nav.className = 'day-nav';
+  nav.innerHTML =
+    '<button class="btn btn-sm" data-act="day-prev">‹ 前一天</button>' +
+    '<div class="day-title">' +
+      '<span class="dt-main">' + fmtDate(date) + ' ' + WD[data.weekday || 1] + '</span>' +
+      '<span class="dt-sub">农历' + esc(data.lunarText || '') +
+        (data.term ? ' · ' + esc(data.term) : '') +
+        (data.holidayName ? ' · 🎉 ' + esc(data.holidayName) : '') + '</span>' +
+    '</div>' +
+    '<button class="btn btn-sm" data-act="day-today">今天</button>' +
+    '<button class="btn btn-sm" data-act="day-next">后一天 ›</button>';
+  content.appendChild(nav);
+
+  const layout = document.createElement('div');
+  layout.className = 'day-layout';
+
+  // ---- 左侧：0-24 时间轴 ----
+  const timeline = document.createElement('div');
+  timeline.className = 'day-timeline';
+  let labelsHTML = '';
+  let slotsHTML = '';
+  for (let h = 0; h < 24; ++h) {
+    labelsHTML += '<div class="dt-hlabel"><span>' + String(h).padStart(2, '0') + ':00</span></div>';
+    slotsHTML += '<div class="dt-slot"></div>';
+  }
+  timeline.innerHTML =
+    '<div class="dt-body">' +
+    '<div class="dt-labels">' + labelsHTML + '</div>' +
+    '<div class="dt-canvas" id="dt-canvas">' + slotsHTML + '</div>' +
+    '</div>';
+
+  const canvas = timeline.querySelector('.dt-canvas');
+
+  // 时间块条目（同时段自动错位排布）
+  const byTime = {};
+  for (const e of (data.timed || [])) {
+    const t = (e.remindTime || '00:00').slice(0, 5);
+    (byTime[t] = byTime[t] || []).push(e);
+  }
+  for (const [time, entries] of Object.entries(byTime)) {
+    const [hh, mm] = time.split(':').map(Number);
+    const top = (hh * 60 + mm) / 60 * DAY_HOUR_PX;
+    entries.forEach((e, i) => {
+      const p = PRIO[e.priority] || PRIO[1];
+      const el = document.createElement('div');
+      el.className = 'dt-entry prio-' + e.priority + (e.virtual ? ' virtual' : '');
+      el.style.top = top + 'px';
+      el.style.left = (i * 10) + 'px';
+      el.style.right = (entries.length > 1 ? (entries.length - 1 - i) * 10 : 0) + 'px';
+      el.title = (e.virtual ? '（重复/农历实例）' : '') + time + ' ' + e.title;
+      el.innerHTML = '<span class="dte-time">' + time + '</span>' +
+        '<span class="dte-title">' + esc(e.title) + '</span>' +
+        (e.virtual ? '<span class="dte-flag">' + (e.lunarInstance ? '🏮' : '↻') + '</span>' : '') +
+        '<span class="dte-prio ' + p.cls + '">' + p.label + '</span>';
+      el.dataset.act = 'edit';
+      el.dataset.id = e.id;
+      canvas.appendChild(el);
+    });
+  }
+
+  // 现在时刻红线
+  if (isToday) {
+    const now = new Date();
+    const line = document.createElement('div');
+    line.className = 'dt-nowline';
+    line.id = 'dt-nowline';
+    const upd = () => {
+      const n = new Date();
+      line.style.top = ((n.getHours() * 60 + n.getMinutes()) / 60 * DAY_HOUR_PX) + 'px';
+      line.title = '现在 ' + String(n.getHours()).padStart(2, '0') + ':' + String(n.getMinutes()).padStart(2, '0');
+    };
+    upd();
+    canvas.appendChild(line);
+    clearInterval(dayNowTimer);
+    dayNowTimer = setInterval(() => {
+      if (!$('#dt-nowline')) { clearInterval(dayNowTimer); return; }
+      upd();
+    }, 60000);
+  }
+
+  // 点击空白时段 → 新建任务（预填日期与时间）
+  canvas.addEventListener('click', e => {
+    if (e.target.closest('.dt-entry')) return;
+    const rect = canvas.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const mins = Math.max(0, Math.min(23 * 60 + 45, Math.round(y / DAY_HOUR_PX * 60 / 15) * 15));
+    const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+    const mm = String(mins % 60).padStart(2, '0');
+    openTaskEditor({ dueDate: date, remindTime: hh + ':' + mm }, true);
+  });
+
+  layout.appendChild(timeline);
+
+  // ---- 右侧：全天 / 已完成 ----
+  const side = document.createElement('div');
+  side.className = 'day-side';
+
+  function sideCard(title, items, cls, emptyTip) {
+    const rows = (items || []).map(e => {
+      const p = PRIO[e.priority] || PRIO[1];
+      return '<div class="ds-item" data-act="edit" data-id="' + e.id + '">' +
+        '<span class="ds-prio ' + p.cls + '">' + p.label + '</span>' +
+        '<span class="ds-title">' + esc(e.title) + '</span>' +
+        (e.virtual ? '<span class="ds-flag">' + (e.lunarInstance ? '🏮' : '↻') + '</span>' : '') +
+        (e.projectName ? '<span class="ds-proj" style="color:' + esc(e.projectColor || '#4A90D9') + '">' +
+          esc(e.projectName) + '</span>' : '') +
+        '</div>';
+    }).join('');
+    return '<div class="day-card ' + (cls || '') + '"><div class="dc-head">' + title +
+      '<span class="cnt">' + (items || []).length + '</span></div>' +
+      (rows || '<div class="empty-tip">' + esc(emptyTip) + '</div>') + '</div>';
+  }
+
+  side.innerHTML = sideCard('全天任务', data.allday, '', '当日无全天任务') +
+    sideCard('已完成', data.done, 'done', '当日暂无完成记录');
+  layout.appendChild(side);
+  content.appendChild(layout);
+
+  // 滚动到当前时刻附近（今天）
+  if (isToday) {
+    const n = new Date();
+    timeline.scrollTop =
+      Math.max(0, (n.getHours() * 60 + n.getMinutes()) / 60 * DAY_HOUR_PX - 160);
+  }
+}
+
+/* ---------------- 专注模式（全屏番茄钟） ---------------- */
+let focusTimer = null;
+let focusKeyHandler = null;
+
+async function enterFocusMode(taskId) {
+  if ($('#focus-root')) return;
+  if (taskId) POMO.taskId = taskId;
+  if (!POMO.taskId) {
+    // 未指定任务：取今日第一个未完成任务
+    try {
+      const r = await apiGet('/api/today');
+      const pool = (r.overdue || []).concat(r.dueToday || [], r.startToday || [], r.noDate || []);
+      if (pool.length) POMO.taskId = pool[0].id;
+    } catch (e) { /* 忽略 */ }
+  }
+  let task = null;
+  if (POMO.taskId) {
+    try { task = await apiGet('/api/tasks/' + POMO.taskId); } catch (e) { /* 忽略 */ }
+  }
+
+  const ov = document.createElement('div');
+  ov.className = 'focus-overlay';
+  ov.id = 'focus-root';
+  ov.innerHTML =
+    '<div class="focus-box">' +
+    '<div class="focus-task" id="focus-task">' +
+      (task ? esc(task.title) : '自由专注（未关联任务）') + '</div>' +
+    '<div class="focus-timer" id="focus-timer">25:00</div>' +
+    '<div class="focus-btns">' +
+      '<button class="btn btn-primary btn-lg" id="focus-start">开始专注</button>' +
+      '<button class="btn btn-lg" id="focus-reset">重置</button>' +
+      (task && task.status !== 'done'
+        ? '<button class="btn btn-lg" id="focus-done">✓ 完成任务</button>' : '') +
+    '</div>' +
+    '<div class="focus-tip">Esc 退出专注模式 · 番茄钟与右下角挂件联动</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+
+  function updateFocusUI() {
+    const m = Math.floor(POMO.remain / 60), s = POMO.remain % 60;
+    const t = $('#focus-timer');
+    if (t) t.textContent = String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    const b = $('#focus-start');
+    if (b) b.textContent = POMO.running ? '暂停' : (POMO.remain < POMO.total ? '继续' : '开始专注');
+  }
+  updateFocusUI();
+  clearInterval(focusTimer);
+  focusTimer = setInterval(updateFocusUI, 500);
+
+  $('#focus-start').addEventListener('click', pomoToggle);
+  $('#focus-reset').addEventListener('click', () => {
+    POMO.running = false;
+    if (POMO.timer) { clearInterval(POMO.timer); POMO.timer = null; }
+    POMO.remain = POMO.total;
+    renderPomo();
+    updateFocusUI();
+  });
+  const btnDone = $('#focus-done');
+  if (btnDone) btnDone.addEventListener('click', async () => {
+    try {
+      const r = await api('POST', '/api/tasks/' + POMO.taskId + '/complete');
+      toast(r.nextInstance && r.nextInstance.id ? '已完成，已生成下一次' : '已完成', 'ok');
+      exitFocusMode();
+      await refreshAll();
+    } catch (e) { toast(e.message, 'err'); }
+  });
+
+  focusKeyHandler = e => {
+    if (e.key === 'Escape') { e.preventDefault(); exitFocusMode(); }
+  };
+  document.addEventListener('keydown', focusKeyHandler);
+}
+
+function exitFocusMode() {
+  var ov = $('#focus-root');
+  if (ov && !ov.classList.contains('closing')) {
+    ov.classList.add('closing');
+    setTimeout(function() { if (ov && ov.parentNode) ov.remove(); }, 220);
+  } else if (ov) {
+    ov.remove();
+  }
+  clearInterval(focusTimer);
+  focusTimer = null;
+  if (focusKeyHandler) {
+    document.removeEventListener('keydown', focusKeyHandler);
+    focusKeyHandler = null;
+  }
+}
+
+/* ---------------- 多端同步（备份快照合并） ---------------- */
+function openSyncModal() {
+  const body = document.createElement('div');
+  body.className = 'sync-box';
+  body.innerHTML =
+    '<div class="sync-step"><div class="ss-title">1. 选择备份快照文件</div>' +
+    '<div class="ss-desc">在另一台设备上「导出 → 完整备份快照」得到 .json 文件，在此选择该文件。' +
+    '合并策略：任务按 id 对齐、更新时间新者胜；项目/标签按名称合并；模板/筛选/节假日去重追加；' +
+    '本地已有数据不会被删除。</div>' +
+    '<input type="file" id="sync-file" accept=".json,application/json" class="sync-file"></div>' +
+    '<div class="sync-step"><div class="ss-title">2. 快照预览</div>' +
+    '<div id="sync-preview" class="sync-preview empty-tip">尚未选择文件</div></div>' +
+    '<div class="sync-step"><div class="ss-title">3. 合并结果</div>' +
+    '<div id="sync-result"></div></div>';
+
+  const foot = document.createElement('div');
+  foot.style.cssText = 'display:flex;gap:8px;width:100%';
+  const btnCancel = document.createElement('button');
+  btnCancel.className = 'btn';
+  btnCancel.textContent = '取消';
+  btnCancel.addEventListener('click', closeModal);
+  const btnGo = document.createElement('button');
+  btnGo.className = 'btn btn-primary';
+  btnGo.textContent = '开始合并';
+  btnGo.disabled = true;
+  foot.appendChild(btnCancel);
+  foot.appendChild(btnGo);
+
+  openModal('多端同步（合并备份快照）', body, foot);
+
+  let snap = null;
+  $('#sync-file').addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0];
+    const prev = $('#sync-preview');
+    snap = null;
+    btnGo.disabled = true;
+    if (!f) { prev.textContent = '尚未选择文件'; return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const d = JSON.parse(reader.result);
+        if (d.app !== 'cpp-todo' || !Array.isArray(d.tasks)) {
+          prev.textContent = '无效文件：应为「完整备份快照」导出的 .json';
+          prev.className = 'sync-preview sync-err';
+          return;
+        }
+        snap = d;
+        prev.className = 'sync-preview';
+        prev.innerHTML = '导出时间：' + esc(d.exportedAt || '未知') + '<br>' +
+          '任务 ' + d.tasks.length + ' 条 · 项目 ' + (d.projects || []).length +
+          ' 个 · 标签 ' + (d.tags || []).length + ' 个 · 模板 ' + (d.templates || []).length + ' 个';
+        btnGo.disabled = false;
+      } catch (err) {
+        prev.textContent = 'JSON 解析失败：' + err.message;
+        prev.className = 'sync-preview sync-err';
+      }
+    };
+    reader.readAsText(f);
+  });
+
+  btnGo.addEventListener('click', async () => {
+    if (!snap) return;
+    var restore = btnLoading(btnGo);
+    try {
+      const r = await api('POST', '/api/sync', snap);
+      $('#sync-result').innerHTML = '<div class="sync-ok">\u2713 ' + esc(r.summary || '合并完成') + '</div>';
+      toast('同步完成', 'ok');
+      await refreshAll();
+      setTimeout(closeModal, 1800);
+    } catch (err) {
+      $('#sync-result').innerHTML = '<div class="sync-err">\u2715 ' + esc(err.message) + '</div>';
+    }
+    finally { restore(); }
   });
 }
 
@@ -1557,6 +1954,12 @@ function bindShortcuts() {
       openPalette();
       return;
     }
+    // 撤销（输入框内不拦截，保留文本编辑的原生撤销）
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      undoLast();
+      return;
+    }
     if (inField) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === 'n' || e.key === 'N') { e.preventDefault(); openTaskEditor(null); }
@@ -1566,6 +1969,8 @@ function bindShortcuts() {
       if (w.classList.contains('hidden')) showPomodoro();
       else w.classList.add('hidden');
     }
+    else if (e.key === 'd' || e.key === 'D') { e.preventDefault(); switchView('day'); }
+    else if (e.key === 'f' || e.key === 'F') { e.preventDefault(); enterFocusMode(); }
     else if (e.key === 't' || e.key === 'T') { toggleTheme(); }
     else if (e.key === 'q' || e.key === 'Q') { e.preventDefault(); const q = $('#quick-input'); if (q) q.focus(); }
     else if (e.key === '?') { openHelpModal(); }
@@ -1608,7 +2013,14 @@ function openModal(title, bodyEl, footEl, wide, noTitle) {
 }
 
 function closeModal() {
-  $('#modal-root').innerHTML = '';
+  var root = $('#modal-root');
+  var mask = root.querySelector('.modal-mask');
+  if (mask && !mask.classList.contains('closing')) {
+    mask.classList.add('closing');
+    setTimeout(function() { root.innerHTML = ''; }, 180);
+  } else {
+    root.innerHTML = '';
+  }
   if (modalKeyHandler) {
     document.removeEventListener('keydown', modalKeyHandler);
     modalKeyHandler = null;
@@ -1616,8 +2028,9 @@ function closeModal() {
 }
 
 /* ---------------- 任务编辑器 ---------------- */
-async function openTaskEditor(task) {
-  const editing = !!task;
+/* task：编辑时传任务对象；新建但需预填字段（如日视图时段点击）时传 {..} 且 forceNew=true */
+async function openTaskEditor(task, forceNew) {
+  const editing = forceNew ? false : !!task;
   const t = task || {};
   const tagsAll = S.tags;
 
@@ -1793,6 +2206,61 @@ async function openTaskEditor(task) {
     });
   });
 
+  // 重复规则预览：显示规则接下来命中的日期
+  const repPrev = document.createElement('div');
+  repPrev.className = 'tf-rep-preview';
+  repPrev.id = 'tf-rep-preview';
+  repBox.appendChild(repPrev);
+  let repPrevTimer = null;
+  function collectRepeatRuleForPreview() {
+    const f = freqSel.value;
+    if (!f) return null;
+    const r = { freq: f, interval: Math.max(1, parseInt($('#tf-interval').value, 10) || 1) };
+    if (f === 'weekly' || f === 'custom') {
+      const wd = Array.from(wdRow.querySelectorAll('.wd-box.on'))
+        .map(b => parseInt(b.dataset.wd, 10)).sort((a, b) => a - b);
+      if (wd.length) r.weekdays = wd;
+    }
+    r.skipWeekends = $('#tf-sk-wk').checked;
+    r.skipHolidays = $('#tf-sk-hd').checked;
+    r.endDate = $('#tf-enddate').value;
+    return r;
+  }
+  async function updateRepPreview() {
+    const rule = collectRepeatRuleForPreview();
+    if (!rule) { repPrev.innerHTML = ''; return; }
+    if ((rule.freq === 'weekly' || rule.freq === 'custom') && !(rule.weekdays && rule.weekdays.length)) {
+      repPrev.innerHTML = '<span class="rp-hint">请先勾选每周几，预览将显示命中日期</span>';
+      return;
+    }
+    try {
+      const from = $('#tf-due').value || S.today;
+      const r = await api('POST', '/api/repeat-preview', { rule: rule, from: from, count: 6 });
+      const dates = r.dates || [];
+      repPrev.innerHTML = dates.length
+        ? '<span class="rp-label">' + svgIcon('calendar', 12) + ' 接下来</span>' +
+          dates.map(d => '<span class="rp-date">' + fmtDate(d) + '</span>').join('<span class="rp-sep">·</span>')
+        : '<span class="rp-hint">该规则在此起点下没有未来实例</span>';
+    } catch (e) {
+      repPrev.innerHTML = '<span class="rp-hint">预览失败：' + esc(e.message) + '</span>';
+    }
+  }
+  function queueRepPreview() {
+    clearTimeout(repPrevTimer);
+    repPrevTimer = setTimeout(updateRepPreview, 250);
+  }
+  freqSel.addEventListener('change', queueRepPreview);
+  ['#tf-interval', '#tf-enddate', '#tf-due'].forEach(id => {
+    const el = $(id, form);
+    if (el) el.addEventListener('input', queueRepPreview);
+  });
+  ['#tf-sk-wk', '#tf-sk-hd'].forEach(id => {
+    const el = $(id, form);
+    if (el) el.addEventListener('change', queueRepPreview);
+  });
+  wdRow.querySelectorAll('.wd-box').forEach(b => b.addEventListener('click', queueRepPreview));
+  updateRepPreview();
+
   // 新标签
   const newTagInput = $('#tf-newtag', form);
   newTagInput.addEventListener('keydown', e => {
@@ -1867,17 +2335,25 @@ async function openTaskEditor(task) {
   btnSave.addEventListener('click', async () => {
     const payload = collectTask(t);
     if (!payload.title) { toast('标题不能为空', 'err'); return; }
+    var restore = btnLoading(btnSave);
     try {
       if (editing) {
         await api('PUT', '/api/tasks/' + t.id, payload);
-        toast('已保存');
+        toast('已保存', 'ok');
       } else {
         const r = await api('POST', '/api/tasks', payload);
-        toast('已创建 #' + r.task.id);
+        S.lastNewTaskId = r.task.id;
+        toast('已创建 #' + r.task.id, 'ok');
       }
       closeModal();
       await refreshAll();
+      if (S.lastNewTaskId) {
+        var newRow = document.querySelector('.task-row[data-id="' + S.lastNewTaskId + '"]');
+        if (newRow) newRow.classList.add('is-new');
+        S.lastNewTaskId = null;
+      }
     } catch (err) { toast('保存失败：' + err.message, 'err'); }
+    finally { restore(); }
   });
 }
 
@@ -1958,12 +2434,18 @@ function openImportModal() {
 
   openModal('导入数据（滴答 / Todoist / Todo.txt）', body, foot);
 
+  // 同步合并入口（备份快照）
+  const syncLink = document.createElement('div');
+  syncLink.className = 'sync-entry-link';
+  syncLink.innerHTML = '<button type="button" class="btn btn-sm" data-act="sync-open">' +
+    svgIcon('sync', 12) + ' 从另一台设备合并备份快照？点此多端同步</button>';
+  body.appendChild(syncLink);
+
   btnGo.addEventListener('click', async () => {
     const format = $('#imp-format').value;
     const text = $('#imp-text').value.trim();
     if (!text) { toast('请粘贴内容', 'err'); return; }
-    btnGo.disabled = true;
-    btnGo.textContent = '导入中…';
+    var restore = btnLoading(btnGo);
     try {
       const r = await fetch('/api/import?format=' + encodeURIComponent(format), {
         method: 'POST',
@@ -1979,17 +2461,13 @@ function openImportModal() {
           : '');
       body.appendChild(box);
       if (data.ok) {
-        toast('导入完成');
+        toast('导入完成', 'ok');
         setTimeout(() => { closeModal(); refreshAll(); }, 1500);
-      } else {
-        btnGo.disabled = false;
-        btnGo.textContent = '重新导入';
       }
     } catch (e) {
       toast('导入失败：' + e.message, 'err');
-      btnGo.disabled = false;
-      btnGo.textContent = '开始导入';
     }
+    finally { restore(); }
   });
 }
 
@@ -2245,6 +2723,8 @@ function bindEvents() {
         await openTaskEditor(t);
       } else if (a === 'del') {
         if (confirm('确定删除该任务？（移入回收站，30 天内可在回收站恢复）')) {
+          var delRow = act.closest('.task-row');
+          if (delRow) { delRow.classList.add('is-deleting'); await new Promise(r => setTimeout(r, 250)); }
           await api('DELETE', '/api/tasks/' + id);
           toast('已移入回收站');
           await refreshAll();
@@ -2320,7 +2800,8 @@ function bindEvents() {
         if (op === 'delete') {
           if (!confirm('将 ' + S.batchSel.size + ' 项任务移入回收站？')) return;
         }
-        await runBatch(op);
+        var restore = btnLoading(act);
+        try { await runBatch(op); } finally { restore(); }
       } else if (a === 'batch-tag') {
         const name = $('#batch-tag').value.trim();
         if (!name) { toast('请输入标签名', 'err'); return; }
@@ -2330,6 +2811,17 @@ function bindEvents() {
         await switchView(S.view);
       } else if (a === 'pomo') {
         showPomodoro(id);
+      } else if (a === 'focus') {
+        await enterFocusMode(id);
+      } else if (a === 'day-prev') {
+        S.dayDate = isoAddDays(S.dayDate || S.today, -1);
+        await switchView('day');
+      } else if (a === 'day-next') {
+        S.dayDate = isoAddDays(S.dayDate || S.today, 1);
+        await switchView('day');
+      } else if (a === 'day-today') {
+        S.dayDate = '';
+        await switchView('day');
       } else if (a === 'export-go') {
         window.open('/api/export?format=' + act.dataset.fmt, '_blank');
         toast('已开始下载');
@@ -2432,10 +2924,12 @@ function bindEvents() {
     if (e.key === 'Escape') drop.classList.add('hidden');
   });
 
-  // 模态框内点击关闭
+  // 模态框内点击关闭；同步入口（导出/导入弹窗内）
   $('#modal-root').addEventListener('click', e => {
     const c = e.target.closest('[data-act="close-modal"]');
     if (c) closeModal();
+    const s = e.target.closest('[data-act="sync-open"]');
+    if (s) { closeModal(); openSyncModal(); }
   });
 }
 

@@ -18,9 +18,11 @@ function esc(s) {
 function toast(msg, type) {
   const t = document.createElement('div');
   t.className = 'toast' + (type ? ' ' + type : '');
-  t.textContent = msg;
+  var ico = type === 'ok' ? '\u2713 ' : type === 'err' ? '\u26a0 ' : '';
+  t.innerHTML = ico ? '<span class="toast-ico">' + ico.trim() + '</span>' : '';
+  t.appendChild(document.createTextNode(msg));
   $('#toast-root').appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; }, 2600);
+  setTimeout(() => { t.classList.add('toast-out'); }, 2600);
   setTimeout(() => t.remove(), 3000);
 }
 
@@ -87,6 +89,17 @@ async function api(method, path, body) {
 }
 const apiGet = (p) => api('GET', p);
 
+/* 按钮加载态：注入旋转图标，禁用按钮，返回恢复函数 */
+function btnLoading(btn) {
+  var orig = btn.innerHTML;
+  btn.classList.add('is-loading');
+  btn.innerHTML = '<span class="btn-spinner"></span>' + orig;
+  return function() {
+    btn.classList.remove('is-loading');
+    btn.innerHTML = orig;
+  };
+}
+
 /* ---------------- 图标辅助 ---------------- */
 function svgIcon(name, size) {
   size = size || 16;
@@ -114,7 +127,8 @@ const S = {
   batchSel: new Set(),   // 已勾选任务 id
   dragTaskId: null,      // 拖拽中的任务 id
   heatYear: 0,           // 热力图当前年份（0=今年）
-  dayDate: ''            // 日视图当前日期（空=今天）
+  dayDate: '',           // 日视图当前日期（空=今天）
+  lastNewTaskId: null    // 新建任务后用于触发淡入动画
 };
 
 /* ---------------- 初始化 ---------------- */
@@ -224,11 +238,64 @@ function renderTagCloud() {
 }
 
 /* ---------------- 视图切换 ---------------- */
+
+/* 根据当前视图生成骨架屏 HTML */
+function skeletonHTML(view) {
+  if (view === 'stats') {
+    return '<div class="sk-wrap"><div class="sk-cards">' +
+      Array(5).fill('<div class="sk-statcard"><div class="sk-line mid"></div><div class="sk-line short"></div></div>').join('') +
+      '</div><div class="sk-card" style="padding:16px"><div class="sk-line"></div><div class="sk-line mid"></div><div class="sk-line short"></div></div></div>';
+  }
+  if (view === 'kanban') {
+    return '<div class="kanban">' + Array(3).fill(
+      '<div class="kb-col"><div class="kb-col-head"><span class="sk-line mid" style="margin:0"></span></div><div class="kb-list">' +
+      Array(3).fill('<div class="kb-card" style="pointer-events:none"><div class="sk-line mid"></div><div class="sk-line short"></div></div>').join('') +
+      '</div></div>'
+    ).join('') + '</div>';
+  }
+  if (view === 'calendar') {
+    return '<div class="cal-grid" style="pointer-events:none">' +
+      Array(35).fill('<div class="cal-cell blank" style="min-height:86px"><div class="sk-line short"></div></div>').join('') + '</div>';
+  }
+  // 默认：列表型骨架
+  return '<div class="sk-wrap"><div class="sk-head"><div class="sk-line"></div></div>' +
+    '<div class="sk-card">' + Array(5).fill(
+      '<div class="sk-row"><div class="sk-check sk-line" style="margin:0"></div><div style="flex:1"><div class="sk-line mid"></div><div class="sk-line short"></div></div></div>'
+    ).join('') + '</div></div>';
+}
+
+/* ---------------- 入场动效 ---------------- */
+/* 视图切换后：内容区块、任务行依次滑入淡入；交错延迟经 CSS 变量 --d 传给样式 */
+function animateEnter(content) {
+  const blocks = content.children;
+  for (let i = 0; i < blocks.length; i++) {
+    const base = Math.min(i * 55, 380);           // 区块交错步长 55ms，封顶 380ms
+    blocks[i].classList.add('anim-enter');
+    blocks[i].style.setProperty('--d', base + 'ms');
+    const rows = blocks[i].querySelectorAll('.task-row');
+    for (let r = 0; r < rows.length; r++) {       // 卡片内任务行二级交错（仅前 9 行，长列表不再逐行等待）
+      rows[r].classList.add('anim-row');
+      rows[r].style.setProperty('--d', base + 90 + Math.min(r, 8) * 40 + 'ms');
+    }
+  }
+}
+
 async function switchView(v) {
+  // 首次加载或视图真正切换时播入场动效；refreshAll() 的同视图重绘不播，避免闪烁
+  const animated = (v !== S.view) || !S.booted;
+  S.booted = true;
   S.view = v;
   $$('#view-nav .nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === v));
   const content = $('#content');
-  content.innerHTML = '';
+  // 骨架屏占位（快速感知加载）
+  content.innerHTML = skeletonHTML(v);
+  // 包装 appendChild：首次追加真实内容时自动清除骨架屏
+  var cleared = false;
+  var origAppend = content.appendChild.bind(content);
+  content.appendChild = function(child) {
+    if (!cleared) { content.innerHTML = ''; cleared = true; content.appendChild = origAppend; }
+    return origAppend(child);
+  };
   try {
     if (v === 'today')     await renderToday(content);
     if (v === 'projects')  await renderProjects(content);
@@ -241,8 +308,11 @@ async function switchView(v) {
     if (v === 'gantt')     await renderGantt(content);
     if (v === 'trash')     await renderTrash(content);
   } catch (e) {
-    content.innerHTML = '<div class="loading">加载失败：' + esc(e.message) + '</div>';
+    content.innerHTML = '<div class="loading"><span class="spin-ico"></span>加载失败：' + esc(e.message) + '</div>';
   }
+  // 确保 appendChild 已恢复
+  if (!cleared) { content.appendChild = origAppend; }
+  if (animated) animateEnter(content);
 }
 
 function viewHead(title, sub, extra) {
@@ -361,7 +431,7 @@ async function renderToday(content) {
   ]);
   const groups = [
     { key: 'overdue',   title: '已逾期',   badge: 'over', cls: 'b-red',   none: '没有逾期任务' },
-    { key: 'dueToday',  title: '今日到期', badge: '',      cls: 'b-blue',  none: '今日无到期任务' },
+    { key: 'dueToday',  title: '今日到期', badge: '',      cls: 'b-amber', none: '今日无到期任务' },
     { key: 'startToday', title: '今日开始', badge: '',     cls: 'b-green', none: '今日无开始任务' },
     { key: 'noDate',    title: '无日期',   badge: '',      cls: '',        none: '无日期任务都清空了' },
     { key: 'doneToday', title: '今日已完成', badge: data.doneToday.length, cls: 'b-green', none: '今天还没完成任务', muted: true }
@@ -1243,8 +1313,12 @@ function openPalette() {
 }
 
 function closePalette() {
-  const p = $('#palette-root');
-  if (p) p.remove();
+  var p = $('#palette-root');
+  if (!p) return;
+  if (!p.classList.contains('closing')) {
+    p.classList.add('closing');
+    setTimeout(function() { if (p.parentNode) p.remove(); }, 160);
+  }
 }
 
 async function fillPalette(q) {
@@ -1368,11 +1442,13 @@ function openSaveTemplateModal(payload) {
       if (body2.dueDate) { body2.dueOffsetDays = daysBetween(S.today, body2.dueDate); body2.dueDate = ''; }
       if (body2.startDate) { body2.startOffsetDays = daysBetween(S.today, body2.startDate); body2.startDate = ''; }
     }
+    var restore = btnLoading(btnSave);
     try {
       await api('POST', '/api/templates', { name: name, body: body2 });
-      toast('模板已保存');
+      toast('模板已保存', 'ok');
       closeModal();
     } catch (e) { toast(e.message, 'err'); }
+    finally { restore(); }
   });
   foot.appendChild(btnCancel);
   foot.appendChild(btnSave);
@@ -1744,8 +1820,13 @@ async function enterFocusMode(taskId) {
 }
 
 function exitFocusMode() {
-  const ov = $('#focus-root');
-  if (ov) ov.remove();
+  var ov = $('#focus-root');
+  if (ov && !ov.classList.contains('closing')) {
+    ov.classList.add('closing');
+    setTimeout(function() { if (ov && ov.parentNode) ov.remove(); }, 220);
+  } else if (ov) {
+    ov.remove();
+  }
   clearInterval(focusTimer);
   focusTimer = null;
   if (focusKeyHandler) {
@@ -1816,19 +1897,17 @@ function openSyncModal() {
 
   btnGo.addEventListener('click', async () => {
     if (!snap) return;
-    btnGo.disabled = true;
-    btnGo.textContent = '合并中…';
+    var restore = btnLoading(btnGo);
     try {
       const r = await api('POST', '/api/sync', snap);
-      $('#sync-result').innerHTML = '<div class="sync-ok">✓ ' + esc(r.summary || '合并完成') + '</div>';
+      $('#sync-result').innerHTML = '<div class="sync-ok">\u2713 ' + esc(r.summary || '合并完成') + '</div>';
       toast('同步完成', 'ok');
       await refreshAll();
       setTimeout(closeModal, 1800);
     } catch (err) {
-      $('#sync-result').innerHTML = '<div class="sync-err">✕ ' + esc(err.message) + '</div>';
-      btnGo.disabled = false;
-      btnGo.textContent = '重新合并';
+      $('#sync-result').innerHTML = '<div class="sync-err">\u2715 ' + esc(err.message) + '</div>';
     }
+    finally { restore(); }
   });
 }
 
@@ -1954,7 +2033,14 @@ function openModal(title, bodyEl, footEl, wide, noTitle) {
 }
 
 function closeModal() {
-  $('#modal-root').innerHTML = '';
+  var root = $('#modal-root');
+  var mask = root.querySelector('.modal-mask');
+  if (mask && !mask.classList.contains('closing')) {
+    mask.classList.add('closing');
+    setTimeout(function() { root.innerHTML = ''; }, 180);
+  } else {
+    root.innerHTML = '';
+  }
   if (modalKeyHandler) {
     document.removeEventListener('keydown', modalKeyHandler);
     modalKeyHandler = null;
@@ -2269,17 +2355,25 @@ async function openTaskEditor(task, forceNew) {
   btnSave.addEventListener('click', async () => {
     const payload = collectTask(t);
     if (!payload.title) { toast('标题不能为空', 'err'); return; }
+    var restore = btnLoading(btnSave);
     try {
       if (editing) {
         await api('PUT', '/api/tasks/' + t.id, payload);
-        toast('已保存');
+        toast('已保存', 'ok');
       } else {
         const r = await api('POST', '/api/tasks', payload);
-        toast('已创建 #' + r.task.id);
+        S.lastNewTaskId = r.task.id;
+        toast('已创建 #' + r.task.id, 'ok');
       }
       closeModal();
       await refreshAll();
+      if (S.lastNewTaskId) {
+        var newRow = document.querySelector('.task-row[data-id="' + S.lastNewTaskId + '"]');
+        if (newRow) newRow.classList.add('is-new');
+        S.lastNewTaskId = null;
+      }
     } catch (err) { toast('保存失败：' + err.message, 'err'); }
+    finally { restore(); }
   });
 }
 
@@ -2371,8 +2465,7 @@ function openImportModal() {
     const format = $('#imp-format').value;
     const text = $('#imp-text').value.trim();
     if (!text) { toast('请粘贴内容', 'err'); return; }
-    btnGo.disabled = true;
-    btnGo.textContent = '导入中…';
+    var restore = btnLoading(btnGo);
     try {
       const r = await fetch('/api/import?format=' + encodeURIComponent(format), {
         method: 'POST',
@@ -2388,17 +2481,13 @@ function openImportModal() {
           : '');
       body.appendChild(box);
       if (data.ok) {
-        toast('导入完成');
+        toast('导入完成', 'ok');
         setTimeout(() => { closeModal(); refreshAll(); }, 1500);
-      } else {
-        btnGo.disabled = false;
-        btnGo.textContent = '重新导入';
       }
     } catch (e) {
       toast('导入失败：' + e.message, 'err');
-      btnGo.disabled = false;
-      btnGo.textContent = '开始导入';
     }
+    finally { restore(); }
   });
 }
 
@@ -2561,6 +2650,14 @@ async function refreshAll() {
 
 /* ---------------- 事件绑定 ---------------- */
 function bindEvents() {
+  // 入场动效结束清理：移除 both 填充残留，避免 transform 锁死干扰 hover / 拖拽
+  $('#content').addEventListener('animationend', e => {
+    if (e.animationName !== 'enter-up') return;
+    const t = e.target;
+    if (t.classList && (t.classList.contains('anim-enter') || t.classList.contains('anim-row')))
+      t.classList.remove('anim-enter', 'anim-row');
+  });
+
   // 视图导航（含番茄钟快捷入口）
   $('#view-nav').addEventListener('click', e => {
     const b = e.target.closest('.nav-item');
@@ -2654,6 +2751,8 @@ function bindEvents() {
         await openTaskEditor(t);
       } else if (a === 'del') {
         if (confirm('确定删除该任务？（移入回收站，30 天内可在回收站恢复）')) {
+          var delRow = act.closest('.task-row');
+          if (delRow) { delRow.classList.add('is-deleting'); await new Promise(r => setTimeout(r, 250)); }
           await api('DELETE', '/api/tasks/' + id);
           toast('已移入回收站');
           await refreshAll();
@@ -2729,7 +2828,8 @@ function bindEvents() {
         if (op === 'delete') {
           if (!confirm('将 ' + S.batchSel.size + ' 项任务移入回收站？')) return;
         }
-        await runBatch(op);
+        var restore = btnLoading(act);
+        try { await runBatch(op); } finally { restore(); }
       } else if (a === 'batch-tag') {
         const name = $('#batch-tag').value.trim();
         if (!name) { toast('请输入标签名', 'err'); return; }
