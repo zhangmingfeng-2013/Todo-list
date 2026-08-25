@@ -1,0 +1,5 @@
+.idea/
+.workbuddy/
+cmake-build-debug/
+date/
+build/CMakeFiles

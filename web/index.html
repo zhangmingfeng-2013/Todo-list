@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>cpp-todo · 本机待办</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <!-- ============ 侧边栏 ============ -->
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-logo">✓</div>
+      <div class="brand-text">
+        <h1>cpp-todo</h1>
+        <p id="lunar-today">农历…</p>
+      </div>
+    </div>
+
+    <nav id="view-nav">
+      <button data-view="today" class="nav-item active" title="今日面板">
+        <span class="nav-ico">◷</span>今日
+      </button>
+      <button data-view="projects" class="nav-item" title="项目视图">
+        <span class="nav-ico">▤</span>项目
+      </button>
+      <button data-view="tags" class="nav-item" title="标签筛选">
+        <span class="nav-ico">#</span>标签
+      </button>
+      <button data-view="calendar" class="nav-item" title="日历视图">
+        <span class="nav-ico">▦</span>日历
+      </button>
+      <button data-view="kanban" class="nav-item" title="看板视图">
+        <span class="nav-ico">≡</span>看板
+      </button>
+      <button data-view="filters" class="nav-item" title="保存的筛选">
+        <span class="nav-ico">⌕</span>筛选
+      </button>
+    </nav>
+
+    <div class="side-section">
+      <h3>项目 <button id="btn-add-project" class="mini-btn" title="新建项目">＋</button></h3>
+      <div id="project-tree"></div>
+    </div>
+
+    <div class="side-section">
+      <h3>标签</h3>
+      <div id="tag-cloud"></div>
+    </div>
+
+    <div class="sidebar-foot">
+      <button id="btn-storage" class="storage-btn" title="选择存储位置（可迁移到 U盘）">
+        <span>💾 存储位置</span>
+        <small>零账号 · 数据仅存本机</small>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ============ 主区域 ============ -->
+  <main id="main">
+    <header id="topbar">
+      <div class="search-wrap">
+        <span class="search-ico">⌕</span>
+        <input id="search-input" type="text" placeholder="搜索任务（标题 / 备注）…" autocomplete="off">
+        <div id="search-drop" class="hidden"></div>
+      </div>
+      <div class="top-actions">
+        <button id="btn-import" class="btn" title="从滴答 / Todoist / Todo.txt 导入">⇩ 导入</button>
+        <button id="btn-new" class="btn btn-primary">＋ 新建任务</button>
+      </div>
+    </header>
+    <div id="content"></div>
+  </main>
+</div>
+
+<!-- 模态框根节点 -->
+<div id="modal-root"></div>
+<!-- 轻提示根节点 -->
+<div id="toast-root"></div>
+
+<script src="vendor/marked.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
