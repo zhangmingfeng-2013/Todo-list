@@ -56,4 +56,7 @@ private:
     HttpResponse handle_repeat_preview(const HttpRequest& req); // POST 重复规则预览（未来 N 次）
     HttpResponse handle_day(const HttpRequest& req);         // GET 时间块日视图数据
     HttpResponse handle_sync(const HttpRequest& req);        // POST 多端同步（合并导入快照）
+    // ---- 心理健康批次 ----
+    HttpResponse handle_journal(const HttpRequest& req);     // GET 情绪日记（成就感日志 + 已放下的事）
+    HttpResponse handle_task_giveup(const HttpRequest& req, long long id); // POST 正式放弃任务（愧疚阻断归档）
 };

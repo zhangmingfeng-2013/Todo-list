@@ -54,6 +54,18 @@ const PRIO = {
 };
 const STATUS_LABEL = { todo: '待办', doing: '进行中', done: '已完成', archived: '已归档' };
 
+/* 任务情绪标签（心理负担维度） */
+const MOODS = {
+  hard:    { label: '费力', emoji: '😰', color: '#b54708', bg: '#fffaeb', border: '#fedf89' },
+  annoying:{ label: '烦躁', emoji: '😤', color: '#c01048', bg: '#fff1f4', border: '#fecdd6' },
+  easy:    { label: '轻松', emoji: '😌', color: '#027a48', bg: '#ecfdf3', border: '#abefc6' },
+  excited: { label: '期待', emoji: '🤩', color: '#175cd3', bg: '#eff8ff', border: '#b2ddff' }
+};
+/* 完成时的即时感受（情绪日记快捷选择） */
+const FEELINGS = ['😌 轻松', '💪 有成就感', '😮‍💨 终于解脱', '🎉 开心', '🧘 平静'];
+/* 愧疚阻断：逾期超过该天数时温和提示「允许放下」 */
+const GUILT_DAYS = 3;
+
 function repeatText(rule) {
   if (!rule || !rule.freq) return '';
   const freqCn = { daily: '天', weekly: '周', monthly: '月', yearly: '年', custom: '周期' }[rule.freq] || '';
@@ -128,12 +140,14 @@ const S = {
   dragTaskId: null,      // 拖拽中的任务 id
   heatYear: 0,           // 热力图当前年份（0=今年）
   dayDate: '',           // 日视图当前日期（空=今天）
-  lastNewTaskId: null    // 新建任务后用于触发淡入动画
+  lastNewTaskId: null,   // 新建任务后用于触发淡入动画
+  tired: false           // 疲惫模式：隐藏高难度任务，只展示 5 分钟内小任务
 };
 
 /* ---------------- 初始化 ---------------- */
 async function init() {
   initTheme();
+  initTiredMode();
   try {
     const meta = await apiGet('/api/meta');
     S.today = meta.today;
@@ -165,6 +179,36 @@ function toggleTheme() {
       document.documentElement.classList.contains('dark') ? 'dark' : 'light');
   } catch (e) { /* 忽略 */ }
   toast(document.documentElement.classList.contains('dark') ? '已切换深色模式' : '已切换浅色模式');
+}
+
+/* ---------------- 疲惫模式 ----------------
+   状态差的时候一键切换：自动隐藏高难度任务，
+   只展示 5 分钟内的小任务（或标记为「轻松」的任务），降低心理门槛。 */
+function initTiredMode() {
+  try { S.tired = localStorage.getItem('todo-tired') === '1'; } catch (e) { S.tired = false; }
+  syncTiredBtn();
+}
+function syncTiredBtn() {
+  const b = $('#btn-tired');
+  if (b) {
+    b.classList.toggle('on', S.tired);
+    b.innerHTML = '<span class="btn-ico"><svg><use href="#icon-tired"/></svg></span>' +
+      (S.tired ? '疲惫中…点我恢复' : '疲惫模式');
+  }
+}
+async function toggleTiredMode() {
+  S.tired = !S.tired;
+  try { localStorage.setItem('todo-tired', S.tired ? '1' : '0'); } catch (e) { /* 忽略 */ }
+  syncTiredBtn();
+  toast(S.tired ? '疲惫模式已开启：只显示 5 分钟小任务，慢慢来 🌙' : '状态回来了，全部任务已恢复展示', 'ok');
+  await refreshAll();
+}
+/* 疲惫模式过滤器：只保留简单低负担任务 */
+function tiredKeep(t) {
+  if (t.priority === 2) return false;               // 隐藏高优先级（高难度）
+  if (t.mood === 'hard' || t.mood === 'annoying') return false;  // 隐藏费力/烦躁
+  if (t.mood === 'easy') return true;               // 轻松任务直接保留
+  return t.estMinutes > 0 && t.estMinutes <= 5;     // 其余仅保留 ≤5 分钟的小任务
 }
 
 async function refreshSidebar() {
@@ -305,6 +349,7 @@ async function switchView(v) {
     if (v === 'kanban')    await renderKanban(content);
     if (v === 'filters')   await renderFilters(content);
     if (v === 'stats')     await renderStats(content);
+    if (v === 'journal')   await renderJournal(content);
     if (v === 'gantt')     await renderGantt(content);
     if (v === 'trash')     await renderTrash(content);
   } catch (e) {
@@ -334,8 +379,11 @@ function taskMeta(t) {
 
   if (t.dueDate) {
     const over = daysBetween(S.today, t.dueDate) < 0 && t.status !== 'done';
+    const overD = over ? -daysBetween(S.today, t.dueDate) : 0;
     chips.push('<span class="m-chip due' + (over ? ' due-overdue' : '') + '">' +
-      '截止 ' + fmtDate(t.dueDate) + (over ? ' · 逾期' + -daysBetween(S.today, t.dueDate) + '天' : '') + '</span>');
+      '截止 ' + fmtDate(t.dueDate) + (over ? ' · 逾期' + overD + '天' : '') + '</span>');
+    if (overD >= GUILT_DAYS)
+      chips.push('<span class="m-chip guilt">🌙 拖了 ' + overD + ' 天，允许放下</span>');
   }
   if (t.startDate) {
     chips.push('<span class="m-chip">开始 ' + fmtDate(t.startDate) + '</span>');
@@ -353,6 +401,14 @@ function taskMeta(t) {
   if (t.status === 'doing') {
     chips.push('<span class="m-chip" style="color:#b54708;background:#fffaeb;border-color:#fedf89">进行中</span>');
   }
+  if (t.mood && MOODS[t.mood]) {
+    const m = MOODS[t.mood];
+    chips.push('<span class="m-chip mood mood-' + t.mood + '">' + m.emoji + ' ' + m.label + '</span>');
+  }
+  if (t.estMinutes) {
+    chips.push('<span class="m-chip estmin"' + (t.estMinutes <= 5 ? ' style="color:#027a48;background:#ecfdf3;border-color:#abefc6"' : '') + '>' +
+      '⏱ ' + (t.estMinutes >= 60 ? (t.estMinutes / 60).toFixed(t.estMinutes % 60 ? 1 : 0) + ' 小时' : t.estMinutes + ' 分钟') + '</span>');
+  }
   for (const tg of t.tags || []) {
     chips.push('<span class="m-chip"><span class="dot" style="background:' + esc(tg.color) + '"></span>' +
       esc(tg.name) + '</span>');
@@ -365,12 +421,16 @@ function taskRowHTML(t, depth) {
   const d = depth || 0;
   const done = t.status === 'done';
   const checkIco = done ? '✓' : '';
+  // 愧疚阻断：逾期较久的任务提供「放下它」出口（温和提示，不弹窗轰炸）
+  const overdueDays = (t.dueDate && !done) ? -daysBetween(S.today, t.dueDate) : 0;
+  const canGiveUp = overdueDays >= GUILT_DAYS;
   const actions =
     '<div class="t-actions">' +
     '<button class="t-btn" data-act="addsub" data-id="' + t.id + '" title="添加子任务">' + svgIcon('plus', 12) + '</button>' +
     '<button class="t-btn" data-act="edit" data-id="' + t.id + '" title="编辑">✎</button>' +
     '<button class="t-btn" data-act="pomo" data-id="' + t.id + '" title="用番茄钟专注此任务">' + svgIcon('pomodoro', 12) + '</button>' +
     '<button class="t-btn" data-act="focus" data-id="' + t.id + '" title="专注模式（全屏番茄钟）">' + svgIcon('focus', 12) + '</button>' +
+    (canGiveUp ? '<button class="t-btn relief" data-act="giveup" data-id="' + t.id + '" title="拖了 ' + overdueDays + ' 天了 · 允许自己放下它">' + svgIcon('relief', 12) + '</button>' : '') +
     '<button class="t-btn danger" data-act="del" data-id="' + t.id + '" title="删除">🗑</button>' +
     '</div>';
 
@@ -457,6 +517,22 @@ async function renderToday(content) {
   // 批量操作条
   if (S.batchMode) content.appendChild(buildBatchBar());
 
+  // 疲惫模式：过滤掉高难度任务，只留 5 分钟小任务
+  let tiredHidden = 0;
+  if (S.tired) {
+    for (const key of ['overdue', 'dueToday', 'startToday', 'noDate']) {
+      const before = (data[key] || []).length;
+      data[key] = (data[key] || []).filter(tiredKeep);
+      tiredHidden += before - data[key].length;
+    }
+    const banner = document.createElement('div');
+    banner.className = 'tired-banner';
+    banner.innerHTML = '<span class="tb-ico">🌙</span><div><b>疲惫模式</b> · 只显示 5 分钟内的小任务' +
+      (tiredHidden ? '（已暂时收起 ' + tiredHidden + ' 个较重的任务，恢复状态后它们都在）' : '') +
+      '<br><span class="tb-tip">状态不好就只做小事，这不是偷懒，是自我照顾。</span></div>';
+    content.appendChild(banner);
+  }
+
   let total = 0;
   const counts = { overdue: 0, dueToday: 0, startToday: 0, noDate: 0, doneToday: 0 };
   for (const g of groups) {
@@ -480,6 +556,8 @@ async function renderToday(content) {
     card.className = 'group';
     card.innerHTML = '<div class="group-title"><span>' + esc(g.title) + '</span>' +
       '<span class="badge ' + g.cls + '">' + counts[g.key] + '</span></div>' +
+      (g.key === 'overdue' && counts.overdue > 0
+        ? '<div class="guilt-tip">🌙 拖了很久的任务不会催你。若已经不想做了，点行内 <b>✦</b> 可以正式放下，消除负罪感。</div>' : '') +
       '<div class="card">' + taskListHTML(data[g.key], { none: g.none }) + '</div>';
     content.appendChild(card);
   }
@@ -832,6 +910,10 @@ async function renderFilters(content) {
     '<div class="ff"><label>状态</label><select id="f-status">' +
     '<option value="">全部</option><option value="todo">待办</option><option value="doing">进行中</option>' +
     '<option value="done">已完成</option></select></div>' +
+    '<div class="ff"><label>心理负担（情绪）</label><select id="f-mood">' +
+    '<option value="">全部</option>' +
+    Object.keys(MOODS).map(k => '<option value="' + k + '">' + MOODS[k].emoji + ' ' + MOODS[k].label + '</option>').join('') +
+    '</select></div>' +
     '<div class="ff"><button class="btn btn-primary" data-act="save-filter">保存筛选</button></div>';
   content.appendChild(form);
 
@@ -847,7 +929,8 @@ async function renderFilters(content) {
         spec.tag ? '标签 ' + esc(spec.tag) : '',
         spec.priority !== undefined && spec.priority !== null && spec.priority !== '' ? '优先级 ' + (PRIO[spec.priority] || {}).label : '',
         spec.dueWithin ? spec.dueWithin + ' 天内到期' : '',
-        spec.status ? STATUS_LABEL[spec.status] : ''
+        spec.status ? STATUS_LABEL[spec.status] : '',
+        spec.mood ? (MOODS[spec.mood] ? MOODS[spec.mood].emoji + ' ' + MOODS[spec.mood].label : spec.mood) : ''
       ].filter(Boolean).join(' · ') || '全部任务';
       return '<div class="filter-item">' +
         '<div><div class="f-name">' + esc(f.name) + '</div>' +
@@ -871,6 +954,7 @@ async function runFilter(f) {
     qs.set('priority', spec.priority);
   if (spec.dueWithin) qs.set('due_within', spec.dueWithin);
   if (spec.status) qs.set('status', spec.status);
+  if (spec.mood) qs.set('mood', spec.mood);
 
   const head = viewHead('筛选结果 · ' + f.name);
   const body = document.createElement('div');
@@ -890,6 +974,61 @@ async function runFilter(f) {
     body.appendChild(card);
   } catch (e) {
     loading.textContent = '查询失败：' + e.message;
+  }
+}
+
+/* ---------------- 情绪日记（成就感日志） ---------------- */
+async function renderJournal(content) {
+  const data = await apiGet('/api/journal');
+  const entries = data.entries || [];
+  const givenUp = data.givenUp || [];
+
+  const head = viewHead('日记', '完成任务时记录的感受 · 你认真生活过的证据');
+  content.appendChild(head);
+
+  // 概览
+  const summary = document.createElement('div');
+  summary.style.cssText = 'display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px';
+  summary.innerHTML =
+    '<span class="m-chip" style="color:var(--ok)">共记录 ' + entries.length + ' 条完成感受</span>' +
+    (givenUp.length ? '<span class="m-chip">已温和放下 ' + givenUp.length + ' 件事</span>' : '') +
+    '<span class="m-chip">连续记录是你给自己的正反馈</span>';
+  content.appendChild(summary);
+
+  // 成就感日志
+  const logCard = document.createElement('div');
+  logCard.className = 'group';
+  if (!entries.length) {
+    logCard.innerHTML = '<div class="group-title"><span>成就感日志</span></div>' +
+      '<div class="card"><div class="empty-tip">还没有记录。完成任务时写下当下感受，这里会慢慢变成你的能量储备站 ⚡</div></div>';
+  } else {
+    logCard.innerHTML = '<div class="group-title"><span>成就感日志</span>' +
+      '<span class="badge b-green">' + entries.length + '</span></div>' +
+      '<div class="card journal-list">' + entries.map(e =>
+        '<div class="journal-item">' +
+        '<div class="ji-feeling">' + esc(e.feeling || '✅') + '</div>' +
+        '<div class="ji-main">' +
+        '<div class="ji-title">' + esc(e.title) + '</div>' +
+        (e.note ? '<div class="ji-note">' + esc(e.note) + '</div>' : '') +
+        '<div class="ji-date">' + esc((e.completedAt || '').replace('T', ' ').slice(0, 16)) + '</div>' +
+        '</div></div>').join('') + '</div>';
+  }
+  content.appendChild(logCard);
+
+  // 已放下的事（愧疚阻断归档区）
+  const giveCard = document.createElement('div');
+  giveCard.className = 'group';
+  if (givenUp.length) {
+    giveCard.innerHTML = '<div class="group-title"><span>已放下的事</span><span class="badge">' + givenUp.length + '</span></div>' +
+      '<div class="guilt-tip" style="margin:0 0 8px">这些是你正式决定放下的任务。放下不是失败，而是把精力留给了更重要的事。若哪天想捡回来，撤销（⌘Z / Ctrl+Z）即可恢复。</div>' +
+      '<div class="card journal-list">' + givenUp.map(g =>
+        '<div class="journal-item gaveup">' +
+        '<div class="ji-feeling">🌙</div>' +
+        '<div class="ji-main">' +
+        '<div class="ji-title" style="text-decoration:line-through;color:var(--text-2)">' + esc(g.title) + '</div>' +
+        '<div class="ji-date">放下于 ' + esc((g.gaveUpAt || '').replace('T', ' ').slice(0, 16)) + ' · 没关系</div>' +
+        '</div></div>').join('') + '</div>';
+    content.appendChild(giveCard);
   }
 }
 
@@ -1962,7 +2101,7 @@ function bindDragEvents() {
 }
 
 /* ---------------- 快捷键 ---------------- */
-const KEY_VIEWS = ['today', 'projects', 'tags', 'calendar', 'kanban', 'filters', 'stats', 'gantt', 'trash'];
+const KEY_VIEWS = ['today', 'projects', 'tags', 'calendar', 'kanban', 'filters', 'stats', 'journal', 'gantt', 'trash'];
 
 function bindShortcuts() {
   document.addEventListener('keydown', e => {
@@ -2047,6 +2186,58 @@ function closeModal() {
   }
 }
 
+/* 完成时的情绪日记弹窗：不只是打勾，顺手记录一下当下感受 */
+function openCompleteModal(id) {
+  const body = document.createElement('div');
+  body.className = 'complete-modal';
+  body.innerHTML =
+    '<div class="cm-emoji">🎉</div>' +
+    '<div class="cm-title">完成啦！记一下此刻的感受？</div>' +
+    '<div class="cm-sub">写一句感受，是给未来的自己攒下的能量。也可以直接跳过。</div>' +
+    '<div class="cm-feelings">' +
+    FEELINGS.map(f => '<button type="button" class="cm-feel" data-feel="' + esc(f) + '">' + esc(f) + '</button>').join('') +
+    '</div>' +
+    '<textarea id="cm-note" class="cm-note" placeholder="此刻在想什么？比如「终于搞定了，松了口气」" maxlength="300"></textarea>';
+
+  const foot = document.createElement('div');
+  foot.innerHTML =
+    '<button type="button" class="btn" data-act="cm-skip">跳过不记录</button>' +
+    '<button type="button" class="btn btn-primary" data-act="cm-save">记下完成</button>';
+
+  openModal('', body, foot, false, true);
+
+  let chosen = '';
+  body.querySelectorAll('.cm-feel').forEach(b => {
+    b.addEventListener('click', () => {
+      body.querySelectorAll('.cm-feel').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      chosen = b.dataset.feel;
+    });
+  });
+  const noteEl = body.querySelector('#cm-note');
+  foot.querySelector('[data-act="cm-skip"]').addEventListener('click', async () => {
+    closeModal();
+    const r = await api('POST', '/api/tasks/' + id + '/complete');
+    afterComplete(r);
+  });
+  foot.querySelector('[data-act="cm-save"]').addEventListener('click', async () => {
+    const note = noteEl.value.trim();
+    closeModal();
+    const r = await api('POST', '/api/tasks/' + id + '/complete',
+      { feeling: chosen || (note ? '✅' : ''), note: note });
+    afterComplete(r);
+  });
+  setTimeout(() => noteEl && noteEl.focus(), 60);
+}
+function afterComplete(r) {
+  if (r && r.nextInstance && r.nextInstance.id) {
+    toast('已完成，自动生成下一次：' + fmtDate(r.nextInstance.dueDate) + '（' + r.nextInstance.title + '）', 'ok');
+  } else {
+    toast('已完成 · 感受已记下 🌟', 'ok');
+  }
+  refreshAll();
+}
+
 /* ---------------- 任务编辑器 ---------------- */
 /* task：编辑时传任务对象；新建但需预填字段（如日视图时段点击）时传 {..} 且 forceNew=true */
 async function openTaskEditor(task, forceNew) {
@@ -2082,6 +2273,16 @@ async function openTaskEditor(task, forceNew) {
     '<option value="done"' + (t.status === 'done' ? ' selected' : '') + '>已完成</option>' +
     '<option value="archived"' + (t.status === 'archived' ? ' selected' : '') + '>已归档</option>' +
     '</select></div>' +
+
+    '<div class="tf"><label>心理负担（情绪标签）</label><select id="tf-mood">' +
+    '<option value="">（未标注）</option>' +
+    Object.keys(MOODS).map(k =>
+      '<option value="' + k + '"' + (t.mood === k ? ' selected' : '') + '>' +
+      MOODS[k].emoji + ' ' + MOODS[k].label + '</option>').join('') +
+    '</select></div>' +
+    '<div class="tf"><label>预计耗时（分钟）</label>' +
+    '<input type="number" id="tf-estmin" min="0" step="5" placeholder="如 5" value="' + (t.estMinutes || '') + '">' +
+    '<span class="hint">用于「疲惫模式」自动筛选 5 分钟内小任务</span></div>' +
 
     '<div class="tf"><label>截止日期</label><input type="date" id="tf-due" value="' + esc(t.dueDate || '') + '"></div>' +
     '<div class="tf"><label>开始日期</label><input type="date" id="tf-start" value="' + esc(t.startDate || '') + '"></div>' +
@@ -2417,6 +2618,8 @@ function collectTask(t) {
     projectId: parseInt(v('#tf-project'), 10),
     parentId: parseInt(v('#tf-parent'), 10),
     repeatRule: repeatRule,
+    mood: v('#tf-mood'),
+    estMinutes: parseInt(v('#tf-estmin'), 10) || 0,
     tags: tags
   };
   return payload;
@@ -2760,6 +2963,7 @@ function bindEvents() {
   $('#btn-theme').addEventListener('click', toggleTheme);
   $('#btn-export').addEventListener('click', openExportModal);
   $('#btn-palette').addEventListener('click', openPalette);
+  $('#btn-tired').addEventListener('click', toggleTiredMode);
 
   // 快速录入（自然语言）：Enter 提交
   const qi = $('#quick-input');
@@ -2815,15 +3019,15 @@ function bindEvents() {
     const id = act.dataset.id ? parseInt(act.dataset.id, 10) : null;
 
     try {
-      if (a === 'done') {
-        const r = await api('POST', '/api/tasks/' + id + '/complete');
-        if (r.nextInstance && r.nextInstance.id) {
-          toast('已完成任务，自动生成下一次：' + fmtDate(r.nextInstance.dueDate) + '（' + r.nextInstance.title + '）', 'ok');
-        } else {
-          toast('已完成', 'ok');
-        }
+    if (a === 'done') {
+      openCompleteModal(id);
+    } else if (a === 'giveup') {
+      if (confirm('确定正式放下这个任务吗？\n\n它会从活跃清单移走、归档到「日记 → 已放下的事」，不再提醒你。\n以后想捡回来，撤销（⌘Z / Ctrl+Z）即可恢复。\n\n放下不是失败，是给自己的心理减负。')) {
+        await api('POST', '/api/tasks/' + id + '/giveup');
+        toast('已放下，别再为它纠结了 🌿', 'ok');
         await refreshAll();
-      } else if (a === 'reopen') {
+      }
+    } else if (a === 'reopen') {
         await api('POST', '/api/tasks/' + id + '/reopen');
         toast('已恢复');
         await refreshAll();
@@ -2963,7 +3167,8 @@ function bindEvents() {
           tag: $('#f-tag').value,
           priority: $('#f-prio').value === '' ? '' : parseInt($('#f-prio').value, 10),
           dueWithin: parseInt($('#f-within').value, 10) || 0,
-          status: $('#f-status').value
+          status: $('#f-status').value,
+          mood: $('#f-mood').value
         };
         await api('POST', '/api/filters', { name: name, spec: spec });
         toast('筛选已保存');

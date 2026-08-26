@@ -1,0 +1,3 @@
+# 训练阶段依赖（仅训练机，不在 cpp-todo 运行时内）
+mlx-lm
+huggingface_hub

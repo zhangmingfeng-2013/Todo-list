@@ -33,6 +33,9 @@
   <symbol id="icon-undo" viewBox="0 0 16 16"><path d="M3 7h7a3.5 3.5 0 010 7H6"/><path d="M6 4L3 7l3 3"/></symbol>
   <symbol id="icon-focus" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="1.5"/></symbol>
   <symbol id="icon-sync" viewBox="0 0 16 16"><path d="M13 6a5 5 0 00-9-1M3 10a5 5 0 009 1"/><path d="M13 2v4h-4M3 14v-4h4"/></symbol>
+  <symbol id="icon-journal" viewBox="0 0 16 16"><path d="M3 2.5h8.5a1.5 1.5 0 011.5 1.5v10H4.5A1.5 1.5 0 013 12.5v-10z"/><path d="M3 12.5A1.5 1.5 0 014.5 11H13"/><path d="M6 5.5h4M6 8h3"/></symbol>
+  <symbol id="icon-tired" viewBox="0 0 16 16"><path d="M13.5 9.5A6 6 0 118 2.5a4.75 4.75 0 005.5 7z"/><path d="M10.5 3h.01M12.5 5h.01M11 7h.01"/></symbol>
+  <symbol id="icon-relief" viewBox="0 0 16 16"><path d="M8 2l1.8 3.6L13.5 6.2l-2.7 2.7.6 3.8L8 10.8 4.6 12.7l.6-3.8L2.5 6.2l3.7-.6z"/></symbol>
 </svg>
 
 <div id="app">
@@ -70,6 +73,9 @@
       </button>
       <button data-view="stats" class="nav-item" title="统计仪表盘">
         <span class="nav-ico"><svg><use href="#icon-stats"/></svg></span>统计
+      </button>
+      <button data-view="journal" class="nav-item" title="情绪日记 · 成就感日志与放下的事">
+        <span class="nav-ico"><svg><use href="#icon-journal"/></svg></span>日记
       </button>
       <button data-view="gantt" class="nav-item" title="甘特 / 依赖图">
         <span class="nav-ico"><svg><use href="#icon-gantt"/></svg></span>甘特图
@@ -113,6 +119,7 @@
         <div id="search-drop" class="hidden"></div>
       </div>
       <div class="top-actions">
+        <button id="btn-tired" class="btn btn-tired" title="疲惫模式：状态不好时只看 5 分钟小任务，降低心理门槛"><span class="btn-ico"><svg><use href="#icon-tired"/></svg></span>疲惫模式</button>
         <button id="btn-palette" class="btn" title="命令面板（⌘K / Ctrl+K）"><span class="btn-ico"><svg><use href="#icon-cmd"/></svg></span>命令面板</button>
         <button id="btn-export" class="btn" title="导出 Todo.txt / JSON / CSV"><span class="btn-ico"><svg><use href="#icon-export"/></svg></span>导出</button>
         <button id="btn-theme" class="btn" title="切换深色模式（T）"><span class="btn-ico"><svg><use href="#icon-theme"/></svg></span>主题</button>

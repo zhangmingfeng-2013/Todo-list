@@ -15,3 +15,5 @@ cpp-todo.app
 *.db
 *.db-wal
 *.db-shm
+# Ignore Python cache files
+ai/__pycache__/

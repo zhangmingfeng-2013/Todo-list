@@ -98,6 +98,9 @@ Json task_basic_json(Db& db, const Db::Row& r) {
     j["completedAt"] = r.get("completed_at");
     j["pomodoros"] = r.get_int("pomodoros");
     j["deletedAt"] = r.get("deleted_at");
+    j["mood"] = r.get("mood");
+    j["estMinutes"] = r.get_int("est_minutes");
+    j["gaveUpAt"] = r.get("gave_up_at");
     std::string rr = r.get("repeat_rule");
     if (!rr.empty()) {
         try { j["repeatRule"] = Json::parse(rr); }
@@ -246,6 +249,12 @@ Json apply_task_body(Db& db, const Json& body, long long id, bool& ok, std::stri
         }
         if (body.has("status")) upd("status", body["status"]);
         if (body.has("sortOrder")) upd("sort_order", body["sortOrder"]);
+        if (body.has("mood")) {
+            std::string v = body["mood"].as_string_or("");
+            upd("mood", v.empty() ? Json("") : Json(v));
+        }
+        if (body.has("estMinutes"))
+            upd("est_minutes", Json(body["estMinutes"].as_int_or(0)));
         if (body.has("repeatRule")) {
             std::string v = body["repeatRule"].dump();
             upd("repeat_rule", v == "{}" ? Json("") : Json(v));
@@ -275,13 +284,15 @@ Json apply_task_body(Db& db, const Json& body, long long id, bool& ok, std::stri
         long long pid = body["projectId"].as_int_or(0);
         long long parent = body["parentId"].as_int_or(0);
         std::string status = body["status"].as_string_or("todo");
+        std::string mood = body["mood"].as_string_or("");
+        long long est_min = body["estMinutes"].as_int_or(0);
         std::string repeat_rule;
         if (body["repeatRule"].is_object() && !body["repeatRule"].empty()) {
             repeat_rule = body["repeatRule"].dump();
         }
         std::string sql = "INSERT INTO tasks(title,notes,priority,start_date,due_date,"
                           "remind_time,has_reminder,lunar_remind,lunar_date,project_id,"
-                          "parent_id,status,repeat_rule) VALUES(" +
+                          "parent_id,status,mood,est_minutes,repeat_rule) VALUES(" +
                           qstr(title) + "," + qstr(notes) + "," + std::to_string(prio) + "," +
                           (start.empty() ? "NULL" : qstr(start)) + "," +
                           (due.empty() ? "NULL" : qstr(due)) + "," +
@@ -290,7 +301,8 @@ Json apply_task_body(Db& db, const Json& body, long long id, bool& ok, std::stri
                           (lunar_date.empty() ? "NULL" : qstr(lunar_date)) + "," +
                           (pid ? std::to_string(pid) : "NULL") + "," +
                           (parent ? std::to_string(parent) : "NULL") + "," +
-                          qstr(status) + "," +
+                          qstr(status) + "," + qstr(mood) + "," +
+                          std::to_string(est_min) + "," +
                           (repeat_rule.empty() ? "''" : qstr(repeat_rule)) + ")";
         db.exec(sql);
         id = db.last_insert_rowid();
@@ -348,6 +360,9 @@ Json task_snapshot_json(Db& db, long long id) {
     j["completed_at"] = row->get("completed_at");
     j["pomodoros"] = row->get_int("pomodoros");
     j["deleted_at"] = row->get("deleted_at");
+    j["mood"] = row->get("mood");
+    j["est_minutes"] = row->get_int("est_minutes");
+    j["gave_up_at"] = row->get("gave_up_at");
     j["repeat_rule"] = row->get("repeat_rule");
     j["created_at"] = row->get("created_at");
     j["updated_at"] = row->get("updated_at");
@@ -401,7 +416,9 @@ static void restore_task_from_snapshot(Db& db, const Json& b) {
         ", project_id=" + nullable_id("project_id") +
         ", sort_order=" + n("sort_order") + ", status=" + qstr(s("status")) +
         ", completed_at=" + val(s("completed_at")) + ", pomodoros=" + n("pomodoros") +
-        ", deleted_at=" + val(s("deleted_at")) + ", repeat_rule=" + qstr(s("repeat_rule"));
+        ", deleted_at=" + val(s("deleted_at")) + ", mood=" + qstr(s("mood")) +
+        ", est_minutes=" + n("est_minutes") + ", gave_up_at=" + val(s("gave_up_at")) +
+        ", repeat_rule=" + qstr(s("repeat_rule"));
     if (exists) {
         db.exec("UPDATE tasks SET " + fields +
                 ", parent_id=" + nullable_id("parent_id") +
@@ -411,14 +428,16 @@ static void restore_task_from_snapshot(Db& db, const Json& b) {
         db.exec("INSERT INTO tasks(id," + std::string(
                     "title,notes,priority,start_date,due_date,remind_time,has_reminder,"
                     "lunar_remind,lunar_date,project_id,parent_id,sort_order,status,"
-                    "completed_at,pomodoros,deleted_at,repeat_rule,created_at,updated_at) ") +
+                    "completed_at,pomodoros,deleted_at,mood,est_minutes,gave_up_at,"
+                    "repeat_rule,created_at,updated_at) ") +
                 "VALUES(" + std::to_string(id) + "," + qstr(s("title")) + "," +
                 qstr(s("notes")) + "," + n("priority") + "," + val(s("start_date")) + "," +
                 val(s("due_date")) + "," + val(s("remind_time")) + "," + n("has_reminder") +
                 "," + n("lunar_remind") + "," + val(s("lunar_date")) + "," +
                 nullable_id("project_id") + ",NULL," + n("sort_order") + "," +
                 qstr(s("status")) + "," + val(s("completed_at")) + "," + n("pomodoros") +
-                "," + val(s("deleted_at")) + "," + qstr(s("repeat_rule")) + "," +
+                "," + val(s("deleted_at")) + "," + qstr(s("mood")) + "," + n("est_minutes") +
+                "," + val(s("gave_up_at")) + "," + qstr(s("repeat_rule")) + "," +
                 qstr(s("created_at")) + "," + qstr(s("updated_at")) + ")");
         long long par = b["parent_id"].as_int_or(0);
         if (par && db.query_one("SELECT 1 FROM tasks WHERE id=?",
@@ -836,6 +855,8 @@ void Api::register_routes(HttpServer& srv) {
     srv.on("POST", "/api/repeat-preview", [this](const HttpRequest& r) { return handle_repeat_preview(r); });
     srv.on("GET", "/api/day", [this](const HttpRequest& r) { return handle_day(r); });
     srv.on("POST", "/api/sync", [this](const HttpRequest& r) { return handle_sync(r); });
+    // ---- 心理健康批次 ----
+    srv.on("GET", "/api/journal", [this](const HttpRequest& r) { return handle_journal(r); });
     // ---- WebDAV 同步 ----
     srv.on("GET", "/api/webdav-config", [this](const HttpRequest& r) { return handle_webdav_config(r); });
     srv.on("PUT", "/api/webdav-config", [this](const HttpRequest& r) { return handle_webdav_config(r); });
@@ -975,6 +996,11 @@ HttpResponse Api::handle_tasks(const HttpRequest& req) {
     if (!prio.empty())
         sql += " AND priority>=" + prio;
 
+    // 情绪标签筛选（hard=费力 annoying=烦躁 easy=轻松 excited=期待）
+    std::string mood = req.q("mood");
+    if (!mood.empty())
+        sql += " AND mood=" + qstr(mood);
+
     std::string q = req.q("q");
     if (!q.empty())
         sql += " AND (title LIKE " + qstr("%" + q + "%") + " OR notes LIKE " +
@@ -1029,6 +1055,8 @@ HttpResponse Api::handle_task_detail(const HttpRequest& req, long long) {
         return handle_pomodoro(req, id);
     if (action == "deps")
         return handle_deps(req, id);
+    if (action == "giveup")
+        return handle_task_giveup(req, id);
     if (id <= 0) return HttpResponse::json(404, error_json("任务不存在").dump());
     if (req.method == "POST" && action.empty()) {
         // 以 POST 更新（兼容表单场景）→ 走 PUT 逻辑
@@ -1576,9 +1604,24 @@ HttpResponse Api::handle_heatmap(const HttpRequest& req) {
 HttpResponse Api::handle_task_complete(const HttpRequest& req, long long id) {
     auto row = db_.query_one("SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL", {std::to_string(id)});
     if (!row) return HttpResponse::json(404, error_json("任务不存在").dump());
+    // 情绪日记：完成时可附带 {feeling, note}（body 可为空）
+    std::string feeling, note;
+    if (!req.body.empty()) {
+        try {
+            Json b = Json::parse(req.body);
+            feeling = b["feeling"].as_string_or("");
+            note = b["note"].as_string_or("");
+        } catch (...) { /* body 不是 JSON 时按无日记处理 */ }
+    }
     Json undo_before = task_snapshot_json(db_, id);
     db_.exec("UPDATE tasks SET status='done', completed_at=" + qstr(now_local()) +
              " WHERE id=" + std::to_string(id));
+    // 写入成就感日志（标题做快照）
+    if (!feeling.empty() || !note.empty()) {
+        db_.exec("INSERT INTO completion_log(task_id,title,feeling,note,completed_at) VALUES(" +
+                 std::to_string(id) + "," + qstr(row->get("title")) + "," + qstr(feeling) +
+                 "," + qstr(note) + "," + qstr(now_local()) + ")");
+    }
     Json created = Json::object();
     long long next_id = 0;
     // 重复任务：生成下一次实例
@@ -1647,6 +1690,58 @@ HttpResponse Api::handle_task_reopen(const HttpRequest& req, long long id) {
     record_undo(db_, "reopen", id, before, 0, row->get("title"));
     Json resp = Json::object();
     resp["ok"] = true;
+    return HttpResponse::json(200, resp.dump());
+}
+
+// ---- 愧疚阻断：正式放弃任务 ----
+// 多次未完成的任务不再弹窗轰炸，而是允许用户主动「放下」：
+// 状态改为 archived 并记录 gave_up_at，正式归档，从活跃清单中消失。
+HttpResponse Api::handle_task_giveup(const HttpRequest& req, long long id) {
+    auto row = db_.query_one("SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL",
+                             {std::to_string(id)});
+    if (!row) return HttpResponse::json(404, error_json("任务不存在").dump());
+    Json before = task_snapshot_json(db_, id);
+    db_.exec("UPDATE tasks SET status='archived', gave_up_at=" + qstr(now_local()) +
+             ", updated_at=datetime('now','localtime') WHERE id=" + std::to_string(id));
+    record_undo(db_, "giveup", id, before, 0, row->get("title"));
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["message"] = "已正式放下「" + row->get("title") + "」。放下不是失败，"
+                      "是把精力留给更重要的事。";
+    return HttpResponse::json(200, resp.dump());
+}
+
+// ---- 情绪日记：成就感日志 + 已放下的事 ----
+HttpResponse Api::handle_journal(const HttpRequest&) {
+    Json entries = Json::array();
+    for (auto& r : db_.query(
+             "SELECT * FROM completion_log ORDER BY completed_at DESC, id DESC LIMIT 500")) {
+        Json j = Json::object();
+        j["id"] = r.get_int("id");
+        j["taskId"] = r.get_int("task_id");
+        j["title"] = r.get("title");
+        j["feeling"] = r.get("feeling");
+        j["note"] = r.get("note");
+        j["completedAt"] = r.get("completed_at");
+        entries.push_back(j);
+    }
+    Json given_up = Json::array();
+    for (auto& r : db_.query(
+             "SELECT id,title,mood,est_minutes,gave_up_at,completed_at FROM tasks "
+             "WHERE gave_up_at IS NOT NULL ORDER BY gave_up_at DESC")) {
+        Json j = Json::object();
+        j["id"] = r.get_int("id");
+        j["title"] = r.get("title");
+        j["mood"] = r.get("mood");
+        j["estMinutes"] = r.get_int("est_minutes");
+        j["gaveUpAt"] = r.get("gave_up_at");
+        given_up.push_back(j);
+    }
+    Json resp = Json::object();
+    resp["ok"] = true;
+    resp["entries"] = entries;
+    resp["givenUp"] = given_up;
+    resp["streakTip"] = "每一条记录都是你认真生活过的证据。";
     return HttpResponse::json(200, resp.dump());
 }
 
@@ -2140,6 +2235,7 @@ const char* undo_action_name(const std::string& action) {
     if (action == "complete") return "完成";
     if (action == "reopen") return "重新打开";
     if (action == "restore") return "恢复";
+    if (action == "giveup") return "放下";
     return "操作";
 }
 
@@ -2185,7 +2281,7 @@ HttpResponse Api::handle_undo(const HttpRequest& req) {
             }
             restore_task_from_snapshot(db_, before);
         } else if (action == "update" || action == "delete" || action == "purge" ||
-                   action == "reopen" || action == "restore") {
+                   action == "reopen" || action == "restore" || action == "giveup") {
             // 其余操作 = 恢复操作前快照
             restore_task_from_snapshot(db_, before);
         } else {

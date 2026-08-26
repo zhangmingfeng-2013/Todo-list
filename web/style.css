@@ -1237,3 +1237,89 @@ html.dark .focus-overlay { background: rgba(0, 0, 0, .96); }
     transition-duration: .01ms !important;
   }
 }
+
+/* ==========================================================================
+   心理福祉功能：情绪标签 / 疲惫模式 / 完成情绪日记 / 愧疚阻断
+   ========================================================================== */
+.btn-tired { color: var(--text-2); }
+.btn-tired.on {
+  background: #f1ecff; border-color: #c9b8ff; color: #5b32c4; font-weight: 600;
+}
+.dark .btn-tired.on { background: #2a2347; border-color: #4a3d7a; color: #c9b8ff; }
+
+/* 任务行情绪标签配色 */
+.m-chip.mood { font-weight: 500; }
+.m-chip.mood-hard     { color: #b54708; background: #fffaeb; border-color: #fedf89; }
+.m-chip.mood-annoying { color: #c01048; background: #fff1f4; border-color: #fecdd6; }
+.m-chip.mood-easy    { color: #027a48; background: #ecfdf3; border-color: #abefc6; }
+.m-chip.mood-excited { color: #175cd3; background: #eff8ff; border-color: #b2ddff; }
+.dark .m-chip.mood-hard     { background: #3a2e12; border-color: #5a471c; }
+.dark .m-chip.mood-annoying { background: #3a1422; border-color: #5c2034; }
+.dark .m-chip.mood-easy    { background: #0f2e20; border-color: #1c4a33; }
+.dark .m-chip.mood-excited { background: #14283f; border-color: #1c3f63; }
+
+/* 愧疚阻断：放下按钮 */
+.t-btn.relief:hover { background: #ecfdf3; color: #027a48; }
+
+/* 疲惫模式提示条 */
+.tired-banner {
+  display: flex; align-items: flex-start; gap: 10px;
+  background: linear-gradient(135deg, #eef2ff, #f5f3ff);
+  border: 1px solid #d9d2fb; border-radius: var(--radius);
+  padding: 12px 16px; margin-bottom: 16px;
+  font-size: 13px; color: #4a3d7a; line-height: 1.7;
+}
+.tired-banner .tb-ico { font-size: 18px; line-height: 1.4; }
+.tired-banner b { color: #3d2f6b; }
+.tired-banner .tb-tip { color: #6b5fa3; font-size: 12px; }
+.dark .tired-banner { background: #221d3a; border-color: #3a315c; color: #c5b8f0; }
+.dark .tired-banner b { color: #d9cfff; }
+.dark .tired-banner .tb-tip { color: #9d8fd0; }
+
+/* 完成情绪弹窗 */
+.complete-modal { text-align: center; padding: 6px 4px 2px; }
+.cm-emoji { font-size: 40px; line-height: 1; margin-bottom: 8px; }
+.cm-title { font-size: 16px; font-weight: 700; color: var(--text); }
+.cm-sub { font-size: 12px; color: var(--text-2); margin: 6px 0 14px; }
+.cm-feelings { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 14px; }
+.cm-feel {
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+  border-radius: 999px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+  transition: all .12s;
+}
+.cm-feel:hover { border-color: var(--primary); }
+.cm-feel.on { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 600; }
+.cm-note {
+  width: 100%; min-height: 70px; resize: vertical; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; font-size: 13px; font-family: inherit; color: var(--text);
+  background: var(--panel);
+}
+.cm-note:focus { outline: none; border-color: var(--primary); }
+
+/* 日记视图 */
+.guilt-tip {
+  font-size: 12px; color: var(--text-2); line-height: 1.7;
+  background: var(--panel-2); border: 1px dashed var(--border);
+  border-radius: var(--radius); padding: 10px 12px; margin: 0 0 8px;
+}
+.journal-list { padding: 4px; }
+.journal-item {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding: 12px; border-radius: var(--radius); border: 1px solid var(--border);
+  background: var(--panel); margin-bottom: 8px;
+}
+.journal-item:last-child { margin-bottom: 0; }
+.ji-feeling {
+  font-size: 22px; line-height: 1; flex: 0 0 auto;
+  width: 40px; height: 40px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--primary-weak);
+}
+.ji-main { flex: 1; min-width: 0; }
+.ji-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.ji-note { font-size: 13px; color: var(--text-2); margin-top: 3px; line-height: 1.6; white-space: pre-wrap; }
+.ji-date { font-size: 11px; color: var(--text-3); margin-top: 5px; }
+.journal-item.gaveup { background: #f8f8fb; border-style: dashed; }
+.journal-item.gaveup .ji-feeling { background: #eef0f5; }
+.dark .journal-item.gaveup { background: #1c1f26; }

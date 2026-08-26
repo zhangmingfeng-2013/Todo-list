@@ -6,14 +6,14 @@
 
 ## 功能总览
 
-| 领域 | 能力 |
-|---|---|
-| 任务建模 | 标题、Markdown 备注、起止/截止日期、时间提醒、三级优先级、标签、项目 |
-| 任务结构 | 无限层级子任务、任务依赖（自动成环检测） |
-| 重复与日历 | 重复任务（每日/周/月/自定义，可跳过周末与节假日）、农历提醒（1900–2100）、节气与法定假日表（`holiday auto` 自动生成） |
-| Web 视图 | 今日面板、项目树、标签、日历（月/周）、时间块日视图、看板、甘特图、统计仪表盘、热力图、回收站（30 天） |
-| 效率工具 | 自然语言快速录入（`明天下午3点 写周报 #工作 !高`）、命令面板（⌘K / Ctrl+K）、任务模板、批量操作、撤销（最近 200 步）、番茄钟、深色主题 |
-| 数据管理 | SQLite WAL 存储、每日自动备份、多格式导入导出、存储位置迁移（U 盘）、WebDAV 同步 |
+| 领域     | 能力                                                                              |
+|--------|---------------------------------------------------------------------------------|
+| 任务建模   | 标题、Markdown 备注、起止/截止日期、时间提醒、三级优先级、标签、项目                                         |
+| 任务结构   | 无限层级子任务、任务依赖（自动成环检测）                                                            |
+| 重复与日历  | 重复任务（每日/周/月/自定义，可跳过周末与节假日）、农历提醒（1900–2100）、节气与法定假日表（`holiday auto` 自动生成）        |
+| Web 视图 | 今日面板、项目树、标签、日历（月/周）、时间块日视图、看板、甘特图、统计仪表盘、热力图、回收站（30 天）                           |
+| 效率工具   | 自然语言快速录入（`明天下午3点 写周报 #工作 !高`）、命令面板（⌘K / Ctrl+K）、任务模板、批量操作、撤销（最近 200 步）、番茄钟、深色主题 |
+| 数据管理   | SQLite WAL 存储、每日自动备份、多格式导入导出、存储位置迁移（U 盘）、WebDAV 同步                              |
 
 ## 快速开始
 
@@ -48,15 +48,15 @@
 
 ### CLI 命令速查
 
-| 分组 | 命令 |
-|---|---|
-| 服务 | `serve [--port N] [--db PATH] [--open]` · `open` |
-| 任务 | `add` · `list/ls`（`--today` `--project` `--tag` `--status` `--due N天内`）· `tree` · `done <id>` · `undo <id>` · `rm <id> [--purge]` · `restore <id>` · `trash [clear]` · `dep/undep <id> <依赖id>` |
-| 组织 | `projects` · `tags` · `calendar [--month YYYY-MM]` · `stats` · `digest`（每日摘要，含农历/节气） |
-| 导入导出 | `import <文件> [--format todotxt\|todoist\|ticktick\|csv]` · `export [--format todotxt\|json\|csv] [--out 文件]` |
-| 备份 | `backup now\|list\|restore <文件>`（`serve` 模式每日自动备份） |
-| 节假日 | `holiday add/rm YYYY-MM-DD` · `holiday list` · `holiday auto [--year N]` |
-| 存储 | `storage` · `storage list`（U 盘标记 ◈）· `storage move <路径>` · `storage reset` |
+| 分组   | 命令                                                                                                                                                                                             |
+|------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 服务   | `serve [--port N] [--db PATH] [--open]` · `open`                                                                                                                                               |
+| 任务   | `add` · `list/ls`（`--today` `--project` `--tag` `--status` `--due N天内`）· `tree` · `done <id>` · `undo <id>` · `rm <id> [--purge]` · `restore <id>` · `trash [clear]` · `dep/undep <id> <依赖id>` |
+| 组织   | `projects` · `tags` · `calendar [--month YYYY-MM]` · `stats` · `digest`（每日摘要，含农历/节气）                                                                                                           |
+| 导入导出 | `import <文件> [--format todotxt\|todoist\|ticktick\|csv]` · `export [--format todotxt\|json\|csv] [--out 文件]`                                                                                   |
+| 备份   | `backup now\|list\|restore <文件>`（`serve` 模式每日自动备份）                                                                                                                                             |
+| 节假日  | `holiday add/rm YYYY-MM-DD` · `holiday list` · `holiday auto [--year N]`                                                                                                                       |
+| 存储   | `storage` · `storage list`（U 盘标记 ◈）· `storage move <路径>` · `storage reset`                                                                                                                     |
 
 全局选项 `--db PATH`；数据库位置优先级：`--db` > `~/.cpp-todo.conf` > `./data/todo.db`。完整参数见 `./build/todo help`。
 
@@ -96,14 +96,14 @@ Web 界面一键包装为原生桌面窗口（系统 WKWebView，无需打包浏
 
 `serve` 模式在 `127.0.0.1` 提供 JSON API，可脚本化集成：
 
-| 分组 | 端点 |
-|---|---|
-| 任务 | `GET/POST /api/tasks` · `GET/PUT/DELETE /api/tasks/{id}` · `POST /api/tasks/batch`（批量）· `POST /api/tasks/reorder` |
-| 视图聚合 | `/api/today` · `/api/calendar` · `/api/kanban` · `/api/day` · `/api/tree` · `/api/stats` · `/api/heatmap` · `/api/digest` |
-| 组织实体 | `GET/POST/PUT/DELETE /api/projects` · `/api/tags` · `/api/filters` · `/api/templates` |
-| 数据 | `POST /api/import` · `GET /api/export` · `GET/POST /api/backups` · `GET/DELETE /api/trash` · `GET /api/storage`（`/volumes`、`/move`） |
-| 效率 | `POST /api/quick-add` · `GET /api/search` · `GET/POST /api/undo` · `POST /api/repeat-preview` · `GET/POST/DELETE /api/holidays`（`/holidays/auto`） |
-| 同步 | `POST /api/sync`（快照合并导入）· `GET/PUT /api/webdav-config` · `POST /api/webdav-sync` |
+| 分组   | 端点                                                                                                                                                |
+|------|---------------------------------------------------------------------------------------------------------------------------------------------------|
+| 任务   | `GET/POST /api/tasks` · `GET/PUT/DELETE /api/tasks/{id}` · `POST /api/tasks/batch`（批量）· `POST /api/tasks/reorder`                                 |
+| 视图聚合 | `/api/today` · `/api/calendar` · `/api/kanban` · `/api/day` · `/api/tree` · `/api/stats` · `/api/heatmap` · `/api/digest`                         |
+| 组织实体 | `GET/POST/PUT/DELETE /api/projects` · `/api/tags` · `/api/filters` · `/api/templates`                                                             |
+| 数据   | `POST /api/import` · `GET /api/export` · `GET/POST /api/backups` · `GET/DELETE /api/trash` · `GET /api/storage`（`/volumes`、`/move`）               |
+| 效率   | `POST /api/quick-add` · `GET /api/search` · `GET/POST /api/undo` · `POST /api/repeat-preview` · `GET/POST/DELETE /api/holidays`（`/holidays/auto`） |
+| 同步   | `POST /api/sync`（快照合并导入）· `GET/PUT /api/webdav-config` · `POST /api/webdav-sync`                                                                  |
 
 示例：
 

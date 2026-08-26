@@ -1,0 +1,7 @@
+# 将自训导出的 GGUF 注册为本地 Ollama 模型，供 AI 服务离线调用。
+# 用法：ollama create cpp-todo-ai -f Modelfile
+
+FROM ./ai/train/model.gguf
+
+# 系统提示：保持与 prompts.py 一致的「只输出 JSON」约束
+SYSTEM """你是一个任务管理 AI，负责拆解目标、抽取待办、动态排序、预判待办。始终只输出 JSON。"""

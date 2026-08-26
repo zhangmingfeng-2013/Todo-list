@@ -1,0 +1,4 @@
+# P0 仅依赖 Python 标准库，无需 pip install。
+# 后续若升级为 FastAPI 服务，可取消下行注释并安装对应依赖：
+# fastapi
+# uvicorn

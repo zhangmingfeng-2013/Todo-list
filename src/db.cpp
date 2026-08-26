@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at TEXT,
     pomodoros INTEGER DEFAULT 0,         -- 已完成番茄钟数
     deleted_at TEXT,                     -- 软删除时间（回收站），NULL=正常
+    mood TEXT DEFAULT '',                -- 情绪标签: hard=费力 annoying=烦躁 easy=轻松 excited=期待
+    est_minutes INTEGER DEFAULT 0,       -- 预计耗时（分钟，0=未设置；疲惫模式只显示<=5）
+    gave_up_at TEXT,                     -- 正式放弃时间（愧疚阻断归档），NULL=未放弃
     repeat_rule TEXT DEFAULT '',         -- JSON: {freq,interval,weekdays,skipWeekends,skipHolidays,endDate}
     created_at TEXT DEFAULT (datetime('now','localtime')),
     updated_at TEXT DEFAULT (datetime('now','localtime'))
@@ -88,6 +91,16 @@ CREATE TABLE IF NOT EXISTS templates (
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
+);
+
+-- 完成时的情绪日记（成就感日志）：任务每次完成可附一段简短感受
+CREATE TABLE IF NOT EXISTS completion_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    title TEXT NOT NULL,                 -- 任务标题快照（任务被清理后日志仍可读）
+    feeling TEXT DEFAULT '',             -- 完成时感受 emoji/短词
+    note TEXT DEFAULT '',                -- 简短感受文字
+    completed_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS undo_log (
@@ -262,6 +275,12 @@ static void migrate_schema(Db& db) {
         db.exec("ALTER TABLE tasks ADD COLUMN pomodoros INTEGER DEFAULT 0");
     if (!cols.count("deleted_at"))
         db.exec("ALTER TABLE tasks ADD COLUMN deleted_at TEXT");
+    if (!cols.count("mood"))
+        db.exec("ALTER TABLE tasks ADD COLUMN mood TEXT DEFAULT ''");
+    if (!cols.count("est_minutes"))
+        db.exec("ALTER TABLE tasks ADD COLUMN est_minutes INTEGER DEFAULT 0");
+    if (!cols.count("gave_up_at"))
+        db.exec("ALTER TABLE tasks ADD COLUMN gave_up_at TEXT");
 }
 
 void init_schema(Db& db) {
