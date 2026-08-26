@@ -1,13 +1,21 @@
+# Ignore IDE and editor directories
 .idea/
 .workbuddy/
 .vscode/
 .venv
+
+# Ignore CMake build directories
 cmake-build-debug/
 date/
+
+# Ignore CMake build files
 build/CMakeFiles
 build/.cmake
-todo-export-2026-08-25.todotxt
+
+# Ignore build artifacts
 cpp-todo.app
+
+# Ignore database files
 *.db
 *.db-wal
 *.db-shm
