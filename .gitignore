@@ -3,18 +3,14 @@
 .workbuddy/
 .vscode/
 .venv
-
 # Ignore CMake build directories
 cmake-build-debug/
 date/
-
 # Ignore CMake build files
 build/CMakeFiles
 build/.cmake
-
 # Ignore build artifacts
 cpp-todo.app
-
 # Ignore database files
 *.db
 *.db-wal

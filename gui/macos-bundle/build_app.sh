@@ -2,8 +2,8 @@
 # build_app.sh —— 构建/重建 cpp-todo.app 桌面 Bundle
 #
 # 用法:
-#     ./gui/build_app.sh                  # 默认在项目根生成 cpp-todo.app
-#     ./gui/build_app.sh --no-sign         # 跳过 ad-hoc 签名（极少用，仅 CI 时）
+#     ./gui/macos-bundle/build_app.sh       # 默认在项目根生成 cpp-todo.app
+#     ./gui/macos-bundle/build_app.sh --no-sign   # 跳过 ad-hoc 签名（极少用，仅 CI 时）
 #
 # 行为:
 #   1. 在项目根生成 cpp-todo.app/ 目录结构
@@ -14,13 +14,22 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TEMPLATE="$ROOT/gui/macos-bundle"
+# 脚本位于 <root>/gui/macos-bundle/，项目根需上跳两级；
+# Info.plist / launcher.sh 与本脚本同目录（TEMPLATE = 脚本所在目录）。
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+TEMPLATE="$SCRIPT_DIR"
 APP="$ROOT/cpp-todo.app"
 ICON_SRC="$ROOT/gui/icons/icon.icns"
 INFO_PLIST_SRC="$TEMPLATE/Info.plist"
 LAUNCHER_SRC="$TEMPLATE/launcher.sh"
 DO_SIGN=1
+
+# 项目根校验（防止脚本再被移动后报出含混的"缺少文件"错误）
+[ -f "$ROOT/CMakeLists.txt" ] || {
+    echo "[build_app] 未能定位项目根：$ROOT 下不存在 CMakeLists.txt" >&2
+    exit 1
+}
 
 for arg in "$@"; do
     case "$arg" in
