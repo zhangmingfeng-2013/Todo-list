@@ -2559,6 +2559,34 @@ async function openStorageModal() {
         '<span id="bk-hint" style="font-size:11px;color:var(--text-3);align-self:center"></span>' +
       '</div>' +
       '<div id="bk-list"><div class="empty-tip" style="padding:4px 0">加载中…</div></div>' +
+    '</div>' +
+    '<div class="webdav-section" style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:600;color:var(--text-heading)">' +
+        '<input type="checkbox" id="wd-enabled"> WebDAV 同步' +
+      '</label>' +
+      '<div id="wd-form" style="display:none;margin-top:10px">' +
+        '<input id="wd-url" class="st-input" type="text" placeholder="WebDAV URL，如 https://dav.example.com/">' +
+        '<input id="wd-username" class="st-input" type="text" placeholder="用户名" style="margin-top:6px">' +
+        '<input id="wd-password" class="st-input" type="password" placeholder="密码" style="margin-top:6px">' +
+        '<input id="wd-remote-dir" class="st-input" type="text" placeholder="远端目录（可选）" style="margin-top:6px">' +
+        '<div style="display:flex;gap:8px;margin-top:6px">' +
+          '<select id="wd-policy" class="st-input" style="flex:1">' +
+            '<option value="newer">冲突策略：较新者胜</option>' +
+            '<option value="local">冲突策略：本地优先</option>' +
+            '<option value="remote">冲突策略：远端优先</option>' +
+            '<option value="both">冲突策略：保留双方</option>' +
+            '<option value="error">冲突策略：报错跳过</option>' +
+          '</select>' +
+          '<label style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;color:var(--text-2)">' +
+            '<input type="checkbox" id="wd-propagate" checked> 传播删除' +
+          '</label>' +
+        '</div>' +
+        '<div style="display:flex;gap:8px;margin-top:10px">' +
+          '<button class="btn btn-sm btn-primary" data-act="wd-save">保存配置</button>' +
+          '<button class="btn btn-sm" data-act="wd-sync" id="btn-wd-sync">立即同步</button>' +
+        '</div>' +
+        '<pre id="wd-log" style="margin-top:8px;display:none;background:var(--bg-2);padding:8px;border-radius:6px;font-size:11px;max-height:120px;overflow:auto;color:var(--text);border:1px solid var(--border)"></pre>' +
+      '</div>' +
     '</div>';
 
   // 备份列表
@@ -2576,7 +2604,66 @@ async function openStorageModal() {
     }
   };
   loadBackups();
+
+  // ---- WebDAV 配置 ----
+  const loadWebdav = async () => {
+    try {
+      const cfg = await apiGet('/api/webdav-config');
+      $('#wd-enabled', body).checked = cfg.webdav_enabled;
+      $('#wd-url', body).value = cfg.webdav_url || '';
+      $('#wd-username', body).value = cfg.webdav_username || '';
+      $('#wd-password', body).value = cfg.webdav_password || '';
+      $('#wd-remote-dir', body).value = cfg.webdav_remote_dir || '';
+      $('#wd-policy', body).value = cfg.webdav_conflict_policy || 'newer';
+      $('#wd-propagate', body).checked = cfg.webdav_propagate_delete !== false;
+      $('#wd-form', body).style.display = cfg.webdav_enabled ? 'block' : 'none';
+    } catch (e) { /* ignore */ }
+  };
+  loadWebdav();
+
+  $('#wd-enabled', body).addEventListener('change', () => {
+    $('#wd-form', body).style.display = $('#wd-enabled', body).checked ? 'block' : 'none';
+  });
+
   body.addEventListener('click', async e => {
+    const saveBtn = e.target.closest('[data-act="wd-save"]');
+    if (saveBtn) {
+      saveBtn.disabled = true;
+      try {
+        await api('PUT', '/api/webdav-config', {
+          enabled: $('#wd-enabled', body).checked,
+          url: $('#wd-url', body).value.trim(),
+          username: $('#wd-username', body).value.trim(),
+          password: $('#wd-password', body).value,
+          remoteDir: $('#wd-remote-dir', body).value.trim(),
+          conflictPolicy: $('#wd-policy', body).value,
+          propagateDelete: $('#wd-propagate', body).checked,
+          timeout: 30
+        });
+        toast('WebDAV 配置已保存', 'ok');
+      } catch (err) {
+        toast('保存失败：' + err.message, 'err');
+      }
+      saveBtn.disabled = false;
+      return;
+    }
+    const syncBtn = e.target.closest('[data-act="wd-sync"]');
+    if (syncBtn) {
+      const logBox = $('#wd-log', body);
+      logBox.style.display = 'block';
+      logBox.textContent = '同步中…';
+      syncBtn.disabled = true;
+      try {
+        const r = await api('POST', '/api/webdav-sync');
+        logBox.textContent = r.output || '同步完成';
+        toast('WebDAV 同步完成', 'ok');
+      } catch (err) {
+        logBox.textContent = '同步失败：' + err.message;
+        toast('同步失败：' + err.message, 'err');
+      }
+      syncBtn.disabled = false;
+      return;
+    }
     const b = e.target.closest('[data-act="backup-now"]');
     if (!b) return;
     b.disabled = true;

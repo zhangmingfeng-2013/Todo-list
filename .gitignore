@@ -1,6 +1,7 @@
 .idea/
 .workbuddy/
 .vscode/
+.venv
 cmake-build-debug/
 date/
 build/CMakeFiles

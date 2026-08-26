@@ -1,0 +1,21 @@
+{
+  "url": "https://dav.example.com/dav/",
+  "username": "your_username",
+  "password": "",
+  "password_env": "DAVSYNC_PASSWORD",
+  "local_dir": "./notes",
+  "remote_dir": "notes",
+  "ignore": [
+    ".davsync.json",
+    "*.davsync.part",
+    ".DS_Store",
+    "Thumbs.db",
+    ".git",
+    "*.tmp",
+    "~$*"
+  ],
+  "conflict_policy": "newer",
+  "propagate_delete": true,
+  "state_file": ".davsync.json",
+  "timeout": 30
+}

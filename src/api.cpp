@@ -11,9 +11,13 @@
 #include <algorithm>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <set>
 #include <sstream>
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -832,6 +836,10 @@ void Api::register_routes(HttpServer& srv) {
     srv.on("POST", "/api/repeat-preview", [this](const HttpRequest& r) { return handle_repeat_preview(r); });
     srv.on("GET", "/api/day", [this](const HttpRequest& r) { return handle_day(r); });
     srv.on("POST", "/api/sync", [this](const HttpRequest& r) { return handle_sync(r); });
+    // ---- WebDAV 同步 ----
+    srv.on("GET", "/api/webdav-config", [this](const HttpRequest& r) { return handle_webdav_config(r); });
+    srv.on("PUT", "/api/webdav-config", [this](const HttpRequest& r) { return handle_webdav_config(r); });
+    srv.on("POST", "/api/webdav-sync", [this](const HttpRequest& r) { return handle_webdav_sync(r); });
 }
 
 // 从 /api/tasks/123 这类路径中取 id（由 handler 传 0 占位后解析）
@@ -2523,4 +2531,139 @@ HttpResponse Api::handle_sync(const HttpRequest& req) {
                       std::to_string(newProjects) + " 个，新增标签 " +
                       std::to_string(newTags) + " 个";
     return HttpResponse::json(200, resp.dump());
+}
+
+// ---- WebDAV 配置与同步 ----
+
+HttpResponse Api::handle_webdav_config(const HttpRequest& req) {
+    std::lock_guard<std::recursive_mutex> lk(Db::mutex());
+    if (req.method == "GET") {
+        Json j = Json::object();
+        const char* keys[] = {
+            "webdav_enabled", "webdav_url", "webdav_username", "webdav_password",
+            "webdav_remote_dir", "webdav_conflict_policy", "webdav_propagate_delete",
+            "webdav_timeout"
+        };
+        for (const char* k : keys) {
+            auto row = db_.query_one("SELECT value FROM settings WHERE key=?", {k});
+            j[k] = row ? row->get("value") : "";
+        }
+        j["webdav_enabled"] = j["webdav_enabled"].as_string_or("") == "1";
+        j["webdav_propagate_delete"] = j["webdav_propagate_delete"].as_string_or("") != "0";
+        j["webdav_timeout"] = j["webdav_timeout"].as_int_or(30);
+        return HttpResponse::json(200, j.dump());
+    }
+    // PUT
+    Json body;
+    try { body = Json::parse(req.body); }
+    catch (...) { return HttpResponse::json(400, error_json("JSON 解析失败").dump()); }
+
+    auto set = [&](const char* key, const std::string& val) {
+        db_.exec("REPLACE INTO settings(key,value) VALUES(" + qstr(key) + "," + qstr(val) + ")");
+    };
+    set("webdav_enabled", body.get_bool("enabled") ? "1" : "0");
+    set("webdav_url", body.get_str("url"));
+    set("webdav_username", body.get_str("username"));
+    set("webdav_password", body.get_str("password"));
+    set("webdav_remote_dir", body.get_str("remoteDir"));
+    set("webdav_conflict_policy", body.get_str("conflictPolicy"));
+    set("webdav_propagate_delete", body.get_bool("propagateDelete") ? "1" : "0");
+    set("webdav_timeout", std::to_string(body["timeout"].as_int_or(30)));
+
+    Json resp = Json::object();
+    resp["ok"] = true;
+    return HttpResponse::json(200, resp.dump());
+}
+
+HttpResponse Api::handle_webdav_sync(const HttpRequest& req) {
+    std::lock_guard<std::recursive_mutex> lk(Db::mutex());
+    (void)req; // POST 无需 body
+
+    auto get_setting = [&](const char* key) -> std::string {
+        auto row = db_.query_one("SELECT value FROM settings WHERE key=?", {key});
+        return row ? row->get("value") : "";
+    };
+    if (get_setting("webdav_enabled") != "1")
+        return HttpResponse::json(400, error_json("WebDAV 同步未启用").dump());
+    std::string url = get_setting("webdav_url");
+    if (url.empty())
+        return HttpResponse::json(400, error_json("未配置 WebDAV URL").dump());
+
+    // WAL checkpoint，保证主库文件完整
+    if (!db_.checkpoint())
+        return HttpResponse::json(500, error_json("数据库 checkpoint 失败").dump());
+
+    fs::path db_path(db_.path());
+    std::string local_dir = db_path.parent_path().string();
+
+    std::string username = get_setting("webdav_username");
+    std::string password = get_setting("webdav_password");
+    std::string remote_dir = get_setting("webdav_remote_dir");
+    std::string conflict_policy = get_setting("webdav_conflict_policy");
+    if (conflict_policy.empty()) conflict_policy = "newer";
+    std::string propagate_delete = get_setting("webdav_propagate_delete");
+    if (propagate_delete.empty()) propagate_delete = "1";
+    std::string timeout_str = get_setting("webdav_timeout");
+    if (timeout_str.empty()) timeout_str = "30";
+
+    // 查找 davsync.py
+    std::vector<std::string> candidates = {
+        "/Users/zhangmingfeng/Projects/TODO-list/webdav-sync/davsync.py",
+        "./webdav-sync/davsync.py",
+        "../webdav-sync/davsync.py",
+    };
+    if (!static_root_.empty()) {
+        fs::path sr(static_root_);
+        candidates.push_back((sr.parent_path() / "webdav-sync" / "davsync.py").string());
+    }
+    std::string script;
+    for (auto& c : candidates) {
+        if (fs::exists(c)) { script = c; break; }
+    }
+    if (script.empty())
+        return HttpResponse::json(500, error_json("找不到 davsync.py，请确认 webdav-sync/ 目录存在").dump());
+
+    // 生成临时配置
+    char tmpfile[256];
+    std::snprintf(tmpfile, sizeof tmpfile, "/tmp/davsync-%lld-%d.json",
+                  static_cast<long long>(std::time(nullptr)), std::rand());
+    {
+        Json cfg = Json::object();
+        cfg["url"] = url;
+        cfg["username"] = username;
+        cfg["password"] = password;
+        cfg["local_dir"] = local_dir;
+        cfg["remote_dir"] = remote_dir;
+        cfg["conflict_policy"] = conflict_policy;
+        cfg["propagate_delete"] = (propagate_delete == "1");
+        cfg["timeout"] = std::atoi(timeout_str.c_str());
+        cfg["ignore"] = Json::array();
+        cfg["ignore"].push_back("*.db-wal");
+        cfg["ignore"].push_back("*.db-shm");
+        cfg["ignore"].push_back("webdav.json");
+        std::ofstream ofs(tmpfile);
+        if (!ofs) {
+            return HttpResponse::json(500, error_json("无法创建临时配置文件").dump());
+        }
+        ofs << cfg.dump_pretty();
+    }
+
+    std::string cmd = "python3 " + script + " sync -c " + tmpfile;
+    std::array<char, 4096> buf{};
+    std::string output;
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        fs::remove(tmpfile);
+        return HttpResponse::json(500, error_json("无法启动同步进程").dump());
+    }
+    while (fgets(buf.data(), static_cast<int>(buf.size()), pipe))
+        output += buf.data();
+    int status = pclose(pipe);
+    fs::remove(tmpfile);
+
+    Json resp = Json::object();
+    resp["ok"] = (status == 0);
+    resp["exitCode"] = status;
+    resp["output"] = output;
+    return HttpResponse::json(status == 0 ? 200 : 500, resp.dump());
 }

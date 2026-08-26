@@ -43,6 +43,41 @@
 
 完整命令见仓库内 CLI 帮助。
 
+## 桌面 GUI（桌面窗口版）
+
+Web 界面可一键包装为原生桌面窗口（macOS 使用系统 WKWebView，无需打包浏览器内核）。
+
+### 方式 A：原生 .app Bundle（推荐）
+
+打包为标准 macOS 应用，Dock 显示专属图标、Launchpad 识别、支持 `open` 命令启动。
+
+```bash
+./gui/build_app.sh                 # 构建 cpp-todo.app Bundle（首次需执行）
+open ./cpp-todo.app                # 启动（建议将 cpp-todo.app 拖到 /Applications）
+```
+
+- Bundle 已 Ad-hoc 签名，可双击启动而不会被 Gatekeeper 拦截
+- 启动器脚本路径：`gui/macos-bundle/launcher.sh`（自动从 bundle 路径反推项目根与 venv）
+- Bundle 元数据：`gui/macos-bundle/Info.plist`
+- `cpp-todo.app` 是构建产物，已加入 `.gitignore`
+
+### 方式 B：直接 Python 启动（开发调试）
+
+```bash
+./run-gui.sh                       # 一键启动桌面窗口
+./run-gui.sh --port 9000           # 指定端口
+./run-gui.sh --db ~/mytodo.db
+```
+
+- 首次运行自动创建 `.venv` 并安装 pywebview（仅需一次，之后直接启动）
+- 后端自动管理：端口空闲则拉起 `build/todo serve`，已有服务则直接复用；关闭窗口时自动停止由本进程拉起的后端
+- 原生菜单：文件 → 在浏览器中打开 / 退出；帮助 → 关于
+- macOS Dock 图标已内置（`gui/icons/icon.icns`），`gui/make_icon.py` 可重新生成
+- 依赖：Python 3.9+（macOS 自带 python3 即可）
+- 启动器源码：`gui/todo-gui.py`
+
+> **关于 Dock 图标**：仅直接 Python 启动时（方式 B），Dock 图标**可能不会**显示——因为 macOS Dock 图标主要来自 .app Bundle 的 `Info.plist`。如希望 Dock 中显示 cpp-todo 图标，请使用方式 A 的 .app Bundle。
+
 ## 存储与同步
 
 - 默认数据库：`./data/todo.db`（可用 `--db PATH` 指定）

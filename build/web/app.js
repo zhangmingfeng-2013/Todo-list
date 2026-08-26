@@ -264,7 +264,26 @@ function skeletonHTML(view) {
     ).join('') + '</div></div>';
 }
 
+/* ---------------- 入场动效 ---------------- */
+/* 视图切换后：内容区块、任务行依次滑入淡入；交错延迟经 CSS 变量 --d 传给样式 */
+function animateEnter(content) {
+  const blocks = content.children;
+  for (let i = 0; i < blocks.length; i++) {
+    const base = Math.min(i * 55, 380);           // 区块交错步长 55ms，封顶 380ms
+    blocks[i].classList.add('anim-enter');
+    blocks[i].style.setProperty('--d', base + 'ms');
+    const rows = blocks[i].querySelectorAll('.task-row');
+    for (let r = 0; r < rows.length; r++) {       // 卡片内任务行二级交错（仅前 9 行，长列表不再逐行等待）
+      rows[r].classList.add('anim-row');
+      rows[r].style.setProperty('--d', base + 90 + Math.min(r, 8) * 40 + 'ms');
+    }
+  }
+}
+
 async function switchView(v) {
+  // 首次加载或视图真正切换时播入场动效；refreshAll() 的同视图重绘不播，避免闪烁
+  const animated = (v !== S.view) || !S.booted;
+  S.booted = true;
   S.view = v;
   $$('#view-nav .nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === v));
   const content = $('#content');
@@ -293,6 +312,7 @@ async function switchView(v) {
   }
   // 确保 appendChild 已恢复
   if (!cleared) { content.appendChild = origAppend; }
+  if (animated) animateEnter(content);
 }
 
 function viewHead(title, sub, extra) {
@@ -2630,6 +2650,14 @@ async function refreshAll() {
 
 /* ---------------- 事件绑定 ---------------- */
 function bindEvents() {
+  // 入场动效结束清理：移除 both 填充残留，避免 transform 锁死干扰 hover / 拖拽
+  $('#content').addEventListener('animationend', e => {
+    if (e.animationName !== 'enter-up') return;
+    const t = e.target;
+    if (t.classList && (t.classList.contains('anim-enter') || t.classList.contains('anim-row')))
+      t.classList.remove('anim-enter', 'anim-row');
+  });
+
   // 视图导航（含番茄钟快捷入口）
   $('#view-nav').addEventListener('click', e => {
     const b = e.target.closest('.nav-item');

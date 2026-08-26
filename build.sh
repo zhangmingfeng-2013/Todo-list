@@ -1,5 +1,5 @@
 #!/bin/bash
-# cpp-todo 一键构建脚本
+# todo 一键构建脚本
 set -e
 cd "$(dirname "$0")"
 

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   cpp-todo — 本地待办 Web 界面（浅色主题）
+   todo — 本地待办 Web 界面（浅色主题）
    ========================================================================== */
 
 :root {
@@ -1106,8 +1106,36 @@ html.dark .focus-overlay { background: rgba(0, 0, 0, .96); }
 .sync-entry-link { margin-top: 12px; text-align: center; }
 
 /* ==========================================================================
+   入场动效 — 首屏与视图切换：元素依次滑入淡入，制造层次感
+   首屏（侧边栏 / 顶栏）由纯 CSS 驱动；视图内容区由 app.js 的
+   animateEnter() 添加 .anim-enter / .anim-row 并以 --d 传入交错延迟
+   ========================================================================== */
+
+/* ---- 关键帧 ---- */
+@keyframes enter-up   { from { opacity: 0; transform: translateY(16px); } }
+@keyframes enter-down { from { opacity: 0; transform: translateY(-12px); } }
+@keyframes enter-left { from { opacity: 0; transform: translateX(-20px); } }
+
+/* ---- 首屏：侧边栏区块依次从左滑入 ---- */
+#sidebar > * { animation: enter-left .5s cubic-bezier(.22,1,.36,1) both; }
+#sidebar > *:nth-child(1) { animation-delay: .05s; }
+#sidebar > *:nth-child(2) { animation-delay: .11s; }
+#sidebar > *:nth-child(3) { animation-delay: .17s; }
+#sidebar > *:nth-child(4) { animation-delay: .23s; }
+#sidebar > *:nth-child(5) { animation-delay: .29s; }
+
+/* ---- 首屏：顶栏控件依次从上滑入 ---- */
+#topbar > * { animation: enter-down .45s cubic-bezier(.22,1,.36,1) both; }
+#topbar > *:nth-child(1) { animation-delay: .12s; }
+#topbar > *:nth-child(2) { animation-delay: .18s; }
+#topbar > *:nth-child(3) { animation-delay: .24s; }
+
+/* ---- 视图切换：内容区块 / 任务行依次上浮（--d 由 JS 注入） ---- */
+.anim-enter { animation: enter-up .48s cubic-bezier(.22,1,.36,1) both; animation-delay: var(--d, 0ms); }
+.anim-row   { animation: enter-up .42s cubic-bezier(.22,1,.36,1) both; animation-delay: var(--d, 0ms); }
+
+/* ==========================================================================
    微动效 — 交互反馈（hover / focus / 点击 / 增删）
-   禁止入场动画，只做微过渡
    ========================================================================== */
 
 /* ---- 关键帧（仅退场和增删用） ---- */
@@ -1204,6 +1232,7 @@ html.dark .focus-overlay { background: rgba(0, 0, 0, .96); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: .01ms !important;
+    animation-delay: 0ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: .01ms !important;
   }

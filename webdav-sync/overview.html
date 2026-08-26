@@ -1,0 +1,1132 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8">
+<title>DavSync — WebDAV 双向同步器</title>
+<style>
+body{font-family:-apple-system,"PingFang SC",sans-serif;max-width:980px;margin:0 auto;padding:24px;background:#14161a;color:#e2e6ea;line-height:1.65}
+h1{color:#7ab0ff;border-bottom:2px solid #2a3140;padding-bottom:8px}
+h2{color:#9fd0ff;margin-top:32px} h3{color:#b8c7d9} h4{color:#8fa3b8}
+code{background:#232936;padding:2px 6px;border-radius:4px;font-size:0.9em;color:#ffb86c}
+pre{background:#1b2029;padding:14px;border-radius:8px;overflow-x:auto;border:1px solid #2a3140}
+pre code{background:none;padding:0;color:#c5d1de}
+table{border-collapse:collapse;margin:12px 0;width:100%}
+td{border:1px solid #2a3140;padding:6px 10px;font-size:0.95em}
+.meta{color:#7f8ea3;font-size:0.9em}
+details{margin:16px 0;border:1px solid #2a3140;border-radius:8px;padding:10px 14px}
+summary{cursor:pointer;color:#7ab0ff;font-weight:600}
+.badge{display:inline-block;background:#1f3a5f;color:#7ab0ff;border-radius:12px;padding:2px 12px;font-size:0.85em;margin-right:6px}
+</style></head><body>
+<h1>DavSync — WebDAV 双向同步器</h1>
+<p><span class="badge">Python 3.8+</span><span class="badge">零依赖</span><span class="badge">双向同步</span><span class="badge">大规模删除保护</span></p>
+<p class="meta">项目路径：/Users/zhangmingfeng/Projects/TODO-list/webdav-sync/ · 更新于 2026-08-26</p>
+<h1>DavSync —— 零依赖 WebDAV 双向同步器</h1>
+
+用 Python 标准库（无任何第三方依赖）实现本地目录与 WebDAV 服务器的双向同步。
+单文件 <code>davsync.py</code>，复制即用，Python 3.8+。
+
+<h2>快速开始</h2>
+
+<pre><code># 1. 生成示例配置并编辑
+python davsync.py init            # 生成 davsync.json
+
+<h1>2. 查看待同步项（只读，不修改任何东西）</h1>
+python davsync.py status -c davsync.json
+
+<h1>3. 执行双向同步</h1>
+python davsync.py sync -c davsync.json
+
+<h1>模拟运行：只打印将执行的操作</h1>
+python davsync.py sync -c davsync.json --dry-run
+</code></pre>
+
+推荐用环境变量传密码，避免明文写在配置里：
+
+<pre><code>export DAVSYNC_PASSWORD=&#x27;&#x27;
+python davsync.py sync -c davsync.json
+</code></pre>
+
+<h2>同步算法（三方比对）</h2>
+
+每次运行对每个文件比对三方状态：
+
+<pre><code>本地当前  vs  上次同步快照(.davsync.json)  vs  远端当前(PROPFIND)
+</code></pre>
+
+<table><tr><td>远端</td></tr>
+<tr><td>---</td></tr>
+<tr><td>未变</td></tr>
+<tr><td>已修改</td></tr>
+<tr><td>已修改</td></tr>
+<tr><td>未变</td></tr>
+<tr><td>已删除</td></tr>
+<tr><td>不存在</td></tr>
+<tr><td>新增</td></tr>
+<tr><td>—</td></tr>
+</table>
+首次同步时若两端存在同名且大小相同、修改时间接近（≤2s）的文件，直接识别为同一文件，不触发冲突。
+
+<h2>配置项（davsync.json）</h2>
+
+<table><tr><td>默认值</td></tr>
+<tr><td>---</td></tr>
+<tr><td>（必填）</td></tr>
+<tr><td>空</td></tr>
+<tr><td>空</td></tr>
+<tr><td>（必填）</td></tr>
+<tr><td>空</td></tr>
+<tr><td>见示例</td></tr>
+<tr><td><code>newer</code></td></tr>
+<tr><td><code>true</code></td></tr>
+<tr><td><code>false</code></td></tr>
+<tr><td><code>.davsync.json</code></td></tr>
+<tr><td><code>30</code></td></tr>
+<tr><td>空</td></tr>
+<tr><td>空</td></tr>
+</table>
+配置中的 <code>url</code> / <code>username</code> / <code>password</code> 支持 <code>${ENV_VAR}</code> 展开。
+
+<h3>冲突策略（conflict_policy）</h3>
+
+<table><tr></tr>
+<tr></tr>
+<tr></tr>
+<tr></tr>
+<tr></tr>
+<tr></tr>
+<tr></tr>
+</table>
+<h2>本地测试（无需真实服务器）</h2>
+
+仓库自带一个最小 WebDAV 测试服务器 <code>tests/dav_server.py</code>（同样零依赖）：
+
+<pre><code>mkdir -p /tmp/davtest/{local,remote}
+python tests/dav_server.py /tmp/davtest/remote 8765 &amp;
+<h1>配置 url 指向 http://127.0.0.1:8765/ 即可完整验证双向同步</h1>
+python tests/dav_server.py /tmp/davtest/remote 8765 --user alice --pass secret   # 带 Basic 认证
+</code></pre>
+
+已验证场景：首次上传、双向增量合并、冲突（newer/both）、删除传播、忽略规则、dry-run、状态查询、大规模删除保护。
+
+<h3>安全机制：大规模删除保护（allow_mass_delete）</h3>
+
+真实事故驱动的设计：WebDAV 服务器目录被清空（服务器重建、<code>/tmp</code> 重启清理、误换
+<code>remote_dir</code>）时，同步器会把「远端文件全部消失」理解为「远端全部删除」，在
+<code>propagate_delete=true</code> 下会把本地文件逐一删除——曾导致正在使用的 SQLite 数据库被误删。
+
+现在的防线：当本次计划的删除操作 ≥ 2 项且达到已跟踪文件数的一半以上时，同步直接中止
+并给出说明。确属有意为之的大规模删除，可在配置中设 <code>&quot;allow_mass_delete&quot;: true</code>，
+或运行时加 <code>--force</code>。<code>--dry-run</code> 不受影响，仅输出警告与删除清单。
+
+<h2>实战示例：同步 TODO-list 应用数据（SQLite + WAL）</h2>
+
+配置文件直接放在应用的存储目录 <code>data/webdav.json</code> 里，所有 WebDAV 参数
+（url / 凭据 / 远端目录 / 冲突策略 / 忽略规则 / 钩子命令）都在存储位置内设置：
+
+<pre><code>python davsync.py sync -c /path/to/TODO-list/data/webdav.json
+</code></pre>
+
+该模式的三项内建行为：
+
+1. <code>local_dir</code> 留空即同步配置文件所在目录——配置跟着数据走，整个目录复制到
+   任何机器都能用。
+2. 配置文件自身自动排除，不会被上传——即使里面写了明文凭据也不会泄漏到
+   WebDAV 服务器。
+3. <code>pre_command</code> / <code>post_command</code> 在存储目录内执行——命令可直接使用相对路径
+   （如 <code>todo.db</code>）。
+
+针对 SQLite WAL 模式的三个关键点：
+
+1. <code>pre_command</code> 先做 WAL checkpoint：应用运行中主库文件不完整（最新数据在
+   <code>-wal</code> 里），同步前执行 <code>PRAGMA wal_checkpoint(TRUNCATE)</code> 把 WAL 合并进主库，
+   保证上传的 <code>todo.db</code> 是完整快照（实测 482KB WAL → 0）。
+2. <code>ignore</code> 排除 <code>*.db-wal</code> / <code>*.db-shm</code>：这两个文件是运行时中间状态，
+   同步它们没有意义且必然引发伪冲突。
+3. 冲突策略对数据库慎用覆盖：数据库文件是整库快照，<code>newer</code> 覆盖即丢失被覆盖端
+   之后的全部修改。推荐单机上传备份场景；若双机使用，改用 <code>both</code> 策略
+   （保留 <code>todo.conflict-*.db</code> 副本）以便人工合并，或干脆 <code>error</code>。
+
+已实测：通过应用 API 新增任务（<code>POST /api/tasks</code>）→ 再次同步仅增量上传
+<code>todo.db</code> → 远端副本中可查到该任务 → 第三次同步无操作。
+
+<h2>已知限制</h2>
+
+<ul><li>变更检测基于 <code>mtime + size + ETag</code> 启发式，不做内容哈希；远端服务器若不提供 <code>getlastmodified</code>/<code>getetag</code>，同尺寸修改可能漏检（坚果云、Nextcloud、Apache、IIS 均提供）。</li>
+<li>仅支持 Basic 认证（配合 HTTPS 使用；明文 HTTP 仅建议本地/内网）。</li>
+<li>上传整个文件读入内存，超大文件（&gt;几百 MB）不建议。</li>
+<li>不同步空目录、不同步文件权限/时间戳以外的元数据。</li>
+<li>多台设备同时同步同一目录时，建议错开运行时间，或使用 <code>both</code>/<code>error</code> 策略防止覆盖。</li>
+</ul>
+<details open><summary>data/webdav.json — 存储位置内的 WebDAV 参数配置</summary><pre><code>{
+  &quot;_说明&quot;: &quot;WebDAV 同步配置（由 webdav-sync/davsync.py 读取）。本文件位于存储目录内即自动同步整个目录，且本文件自身不会被上传（含凭据）。local_dir 留空表示同步本文件所在目录。以 _ 开头的字段为注释，可安全删除。&quot;,
+
+  &quot;url&quot;: &quot;http://127.0.0.1:8765/&quot;,
+  &quot;_说明_url&quot;: &quot;WebDAV 服务器地址，如 https://dav.example.com/dav/，支持 ${ENV_VAR} 展开&quot;,
+
+  &quot;username&quot;: &quot;&quot;,
+  &quot;_说明_username&quot;: &quot;Basic 认证用户名，留空为匿名&quot;,
+
+  &quot;password&quot;: &quot;&quot;,
+  &quot;_说明_password&quot;: &quot;密码明文（建议改用 password_env 环境变量）&quot;,
+
+  &quot;password_env&quot;: &quot;DAVSYNC_PASSWORD&quot;,
+  &quot;_说明_password_env&quot;: &quot;若设置了该环境变量，则优先用它作为密码&quot;,
+
+  &quot;remote_dir&quot;: &quot;todo-list&quot;,
+  &quot;_说明_remote_dir&quot;: &quot;远端子目录（相对 url），留空为根目录&quot;,
+
+  &quot;ignore&quot;: [
+    &quot;.davsync.json&quot;,
+    &quot;*.davsync.part&quot;,
+    &quot;*.davsync.json.tmp&quot;,
+    &quot;.DS_Store&quot;,
+    &quot;*.tmp&quot;,
+    &quot;*.db-wal&quot;,
+    &quot;*.db-shm&quot;
+  ],
+  &quot;_说明_ignore&quot;: &quot;忽略规则（Glob）；*.db-wal/*.db-shm 是 SQLite 运行时文件，不可同步&quot;,
+
+  &quot;conflict_policy&quot;: &quot;newer&quot;,
+  &quot;_说明_conflict_policy&quot;: &quot;冲突策略: newer 较新胜 | local | remote | both 保留两份 | error 跳过待处理。整库文件被覆盖会丢数据，双机使用建议 both 或 error&quot;,
+
+  &quot;propagate_delete&quot;: true,
+  &quot;_说明_propagate_delete&quot;: &quot;true=删除同步到对端; false=被删文件从对端恢复&quot;,
+
+  &quot;timeout&quot;: 30,
+  &quot;_说明_timeout&quot;: &quot;HTTP 超时（秒）&quot;,
+
+  &quot;pre_command&quot;: &quot;python3 -c \&quot;import sqlite3; sqlite3.connect(&#x27;todo.db&#x27;).execute(&#x27;PRAGMA wal_checkpoint(TRUNCATE)&#x27;)\&quot;&quot;,
+  &quot;_说明_pre_command&quot;: &quot;同步前执行的 shell 命令（相对 local_dir 运行）：先把 SQLite WAL 合并进主库，保证上传的 todo.db 是完整快照。失败则中止同步&quot;
+}
+</code></pre></details>
+<details><summary>tests/dav_server.py — 本地测试服务器</summary><pre><code>#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+&quot;&quot;&quot;最小 WebDAV 测试服务器（仅标准库），用于本地验证 davsync.py。
+
+用法:
+    python dav_server.py [docroot] [port]
+例:
+    python dav_server.py /tmp/davtest/remote 8765
+
+支持: PROPFIND(Depth 0/1) / GET / PUT / MKCOL / DELETE / MOVE
+支持 Basic 认证（可选）: --user name --pass secret
+&quot;&quot;&quot;
+import argparse
+import os
+import shutil
+import sys
+from email.utils import formatdate
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote, urlparse
+
+
+def make_handler(root, user, password):
+    auth = None
+    if user:
+        import base64
+        token = base64.b64encode((&quot;%s:%s&quot; % (user, password)).encode()).decode()
+        auth = &quot;Basic &quot; + token
+
+    class DAVHandler(BaseHTTPRequestHandler):
+        protocol_version = &quot;HTTP/1.1&quot;
+
+        # -- 工具 --------------------------------------------------------
+        def _fs(self, url_path):
+            rel = unquote(urlparse(url_path).path).lstrip(&quot;/&quot;)
+            return os.path.normpath(os.path.join(root, rel))
+
+        def _href(self, fs_path):
+            rel = os.path.relpath(fs_path, root).replace(os.sep, &quot;/&quot;)
+            return &quot;/&quot; if rel == &quot;.&quot; else &quot;/&quot; + rel
+
+        def _etag(self, fs_path):
+            st = os.stat(fs_path)
+            return &#x27;&quot;%x-%x&quot;&#x27; % (st.st_size, int(st.st_mtime))
+
+        def _send(self, code, body=b&quot;&quot;, ctype=&quot;text/plain; charset=utf-8&quot;, extra=None):
+            self.send_response(code)
+            self.send_header(&quot;Content-Type&quot;, ctype)
+            self.send_header(&quot;Content-Length&quot;, str(len(body)))
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+
+        def _check_auth(self):
+            if auth is None:
+                return True
+            if self.headers.get(&quot;Authorization&quot;) == auth:
+                return True
+            self._send(401, b&quot;Unauthorized&quot;, extra={&quot;WWW-Authenticate&quot;: &#x27;Basic realm=&quot;dav&quot;&#x27;})
+            return False
+
+        def _read_body(self):
+            length = int(self.headers.get(&quot;Content-Length&quot;) or 0)
+            return self.rfile.read(length) if length else b&quot;&quot;
+
+        # -- 方法 --------------------------------------------------------
+        def do_GET(self):
+            if not self._check_auth():
+                return
+            fs = self._fs(self.path)
+            if os.path.isdir(fs):
+                self._send(405, b&quot;directory&quot;)
+                return
+            if not os.path.isfile(fs):
+                self._send(404, b&quot;Not Found&quot;)
+                return
+            with open(fs, &quot;rb&quot;) as f:
+                body = f.read()
+            self._send(200, body, &quot;application/octet-stream&quot;, extra={
+                &quot;Last-Modified&quot;: formatdate(os.path.getmtime(fs), usegmt=True),
+                &quot;ETag&quot;: self._etag(fs),
+            })
+
+        def do_PUT(self):
+            if not self._check_auth():
+                return
+            body = self._read_body()
+            fs = self._fs(self.path)
+            existed = os.path.isfile(fs)
+            os.makedirs(os.path.dirname(fs), exist_ok=True)
+            with open(fs, &quot;wb&quot;) as f:
+                f.write(body)
+            self._send(204 if existed else 201)
+
+        def do_MKCOL(self):
+            if not self._check_auth():
+                return
+            self._read_body()
+            fs = self._fs(self.path)
+            if os.path.exists(fs):
+                self._send(405)
+                return
+            os.makedirs(fs)
+            self._send(201)
+
+        def do_DELETE(self):
+            if not self._check_auth():
+                return
+            self._read_body()
+            fs = self._fs(self.path)
+            if not os.path.exists(fs):
+                self._send(404)
+                return
+            if os.path.isdir(fs):
+                shutil.rmtree(fs)
+            else:
+                os.remove(fs)
+            self._send(204)
+
+        def do_MOVE(self):
+            if not self._check_auth():
+                return
+            self._read_body()
+            dest = self.headers.get(&quot;Destination&quot;)
+            if not dest:
+                self._send(400, b&quot;missing Destination&quot;)
+                return
+            fs_src = self._fs(self.path)
+            fs_dst = self._fs(dest)
+            if not os.path.exists(fs_src):
+                self._send(404)
+                return
+            os.makedirs(os.path.dirname(fs_dst), exist_ok=True)
+            shutil.move(fs_src, fs_dst)
+            self._send(201)
+
+        def do_PROPFIND(self):
+            if not self._check_auth():
+                return
+            self._read_body()
+            depth = self.headers.get(&quot;Depth&quot;, &quot;1&quot;)
+            fs = self._fs(self.path)
+            if not os.path.exists(fs):
+                self._send(404, b&quot;Not Found&quot;)
+                return
+            paths = [fs]
+            if depth != &quot;0&quot; and os.path.isdir(fs):
+                paths += [os.path.join(fs, n) for n in sorted(os.listdir(fs))]
+            parts = [&#x27;&lt;?xml version=&quot;1.0&quot; encoding=&quot;utf-8&quot;?&gt;&#x27;, &#x27;&lt;d:multistatus xmlns:d=&quot;DAV:&quot;&gt;&#x27;]
+            for p in paths:
+                isdir = os.path.isdir(p)
+                st = os.stat(p)
+                size = 0 if isdir else st.st_size
+                rt = (&quot;&lt;d:resourcetype&gt;&lt;d:collection/&gt;&lt;/d:resourcetype&gt;&quot;
+                      if isdir else &quot;&lt;d:resourcetype/&gt;&quot;)
+                cl = &quot;&quot; if isdir else &quot;&lt;d:getcontentlength&gt;%d&lt;/d:getcontentlength&gt;&quot; % size
+                parts.append(
+                    &quot;&lt;d:response&gt;&lt;d:href&gt;%s&lt;/d:href&gt;&lt;d:propstat&gt;&lt;d:prop&gt;%s%s&quot;
+                    &quot;&lt;d:getlastmodified&gt;%s&lt;/d:getlastmodified&gt;&quot;
+                    &quot;&lt;d:getetag&gt;%s&lt;/d:getetag&gt;&quot;
+                    &quot;&lt;/d:prop&gt;&lt;d:status&gt;HTTP/1.1 200 OK&lt;/d:status&gt;&quot;
+                    &quot;&lt;/d:propstat&gt;&lt;/d:response&gt;&quot; % (
+                        self._href(p), rt, cl,
+                        formatdate(st.st_mtime, usegmt=True),
+                        &#x27;&quot;%x-%x&quot;&#x27; % (size, int(st.st_mtime)),
+                    )
+                )
+            parts.append(&quot;&lt;/d:multistatus&gt;&quot;)
+            self._send(207, &quot;\n&quot;.join(parts).encode(&quot;utf-8&quot;),
+                       &quot;application/xml; charset=utf-8&quot;)
+
+        def log_message(self, fmt, *args):
+            sys.stderr.write(&quot;[dav] %s\n&quot; % (fmt % args))
+
+    return DAVHandler
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument(&quot;root&quot;, nargs=&quot;?&quot;, default=&quot;.&quot;)
+    ap.add_argument(&quot;port&quot;, nargs=&quot;?&quot;, type=int, default=8765)
+    ap.add_argument(&quot;--user&quot;, default=&quot;&quot;)
+    ap.add_argument(&quot;--pass&quot;, dest=&quot;password&quot;, default=&quot;&quot;)
+    args = ap.parse_args()
+
+    root = os.path.abspath(args.root)
+    os.makedirs(root, exist_ok=True)
+    httpd = ThreadingHTTPServer((&quot;127.0.0.1&quot;, args.port),
+                                make_handler(root, args.user, args.password))
+    print(&quot;WebDAV test server: http://127.0.0.1:%d/  root=%s  auth=%s&quot;
+          % (args.port, root, &quot;on&quot; if args.user else &quot;off&quot;), flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre></details>
+<details><summary>davsync.py — 核心脚本全文</summary><pre><code>#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+&quot;&quot;&quot;DavSync —— 零依赖 WebDAV 双向同步器
+
+仅使用 Python 标准库，将本地目录与 WebDAV 目录保持双向同步。
+
+核心思路（三方比对）：
+    本地快照  vs  上次同步状态  vs  远端快照
+    - 仅本地变化        -&gt; 上传
+    - 仅远端变化        -&gt; 下载
+    - 两端都变化        -&gt; 按冲突策略处理（可配置）
+    - 一端删除、一端未变 -&gt; 按配置传播删除（或恢复）
+
+特性：
+    - 冲突策略可配置：newer / local / remote / both / error
+    - 删除传播可开关，忽略规则支持 Glob
+    - 模拟运行（--dry-run）与状态查看（status）
+    - 配置文件支持 ${ENV_VAR} 与环境变量密码，避免明文泄露
+
+用法：
+    python davsync.py init                        # 生成示例配置 davsync.json
+    python davsync.py sync  -c davsync.json       # 执行双向同步
+    python davsync.py status -c davsync.json      # 查看待同步项（不修改任何东西）
+    python davsync.py sync  -c davsync.json --dry-run
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import base64
+import fnmatch
+import json
+import os
+import posixpath
+import re
+import shutil
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
+from email.utils import parsedate_to_datetime
+from urllib.parse import quote, unquote, urlparse
+from xml.etree import ElementTree as ET
+
+DAV = &quot;{DAV:}&quot;
+
+PROPFIND_BODY = (
+    &#x27;&lt;?xml version=&quot;1.0&quot; encoding=&quot;utf-8&quot;?&gt;&#x27;
+    &#x27;&lt;d:propfind xmlns:d=&quot;DAV:&quot;&gt;&#x27;
+    &#x27;&lt;d:prop&gt;&lt;d:resourcetype/&gt;&lt;d:getcontentlength/&gt;&#x27;
+    &#x27;&lt;d:getlastmodified/&gt;&lt;d:getetag/&gt;&lt;/d:prop&gt;&#x27;
+    &#x27;&lt;/d:propfind&gt;&#x27;
+).encode(&quot;utf-8&quot;)
+
+CONFLICT_POLICIES = (&quot;newer&quot;, &quot;local&quot;, &quot;remote&quot;, &quot;both&quot;, &quot;error&quot;)
+
+LABEL = {
+    &quot;upload&quot;: &quot;上传&quot;,
+    &quot;download&quot;: &quot;下载&quot;,
+    &quot;delete_local&quot;: &quot;删除本地&quot;,
+    &quot;delete_remote&quot;: &quot;删除远端&quot;,
+    &quot;keep_both&quot;: &quot;冲突保留两份&quot;,
+    &quot;conflict&quot;: &quot;冲突未处理&quot;,
+    &quot;forget&quot;: &quot;清理记录&quot;,
+    &quot;ok&quot;: &quot;跳过&quot;,
+}
+
+DEFAULT_CONFIG = {
+    &quot;url&quot;: &quot;&quot;,                    # WebDAV 服务器地址，如 https://dav.example.com/dav/
+    &quot;username&quot;: &quot;&quot;,               # 用户名（留空则匿名）
+    &quot;password&quot;: &quot;&quot;,               # 密码
+    &quot;password_env&quot;: &quot;&quot;,           # 优先从该环境变量读取密码，如 DAVSYNC_PASSWORD
+    &quot;local_dir&quot;: &quot;&quot;,              # 本地目录
+    &quot;remote_dir&quot;: &quot;&quot;,             # 远端子目录（相对 url，留空为根）
+    &quot;ignore&quot;: [                   # 忽略规则：无通配符时按路径段匹配任意层级
+        &quot;.davsync.json&quot;,
+        &quot;*.davsync.part&quot;,
+        &quot;.DS_Store&quot;,
+        &quot;Thumbs.db&quot;,
+        &quot;.git&quot;,
+        &quot;*.tmp&quot;,
+        &quot;~$*&quot;,
+    ],
+    &quot;conflict_policy&quot;: &quot;newer&quot;,   # newer | local | remote | both | error
+    &quot;propagate_delete&quot;: True,     # 是否把一端的删除传播到另一端
+    &quot;allow_mass_delete&quot;: False,   # 大规模删除保护：疑似对端数据丢失时中止（--force 可越过）
+    &quot;state_file&quot;: &quot;.davsync.json&quot;,# 同步状态文件（相对 local_dir）
+    &quot;timeout&quot;: 30,                # HTTP 超时（秒）
+    &quot;pre_command&quot;: &quot;&quot;,            # 同步前执行的 shell 命令（如 SQLite WAL checkpoint）
+    &quot;post_command&quot;: &quot;&quot;,           # 同步完成后执行的 shell 命令（仅全部成功时）
+}
+
+
+class SyncError(Exception):
+    &quot;&quot;&quot;同步过程中的可报告错误。&quot;&quot;&quot;
+
+
+# ---------------------------------------------------------------------------
+# WebDAV 客户端（仅标准库）
+# ---------------------------------------------------------------------------
+class FileInfo:
+    __slots__ = (&quot;rel&quot;, &quot;is_dir&quot;, &quot;size&quot;, &quot;mtime&quot;, &quot;etag&quot;)
+
+    def __init__(self, rel: str):
+        self.rel = rel
+        self.is_dir = False
+        self.size = -1
+        self.mtime = None
+        self.etag = None
+
+
+class WebDAVClient:
+    &quot;&quot;&quot;极简 WebDAV 客户端：PROPFIND / GET / PUT / MKCOL / DELETE / MOVE。&quot;&quot;&quot;
+
+    def __init__(self, base_url, username=None, password=None, timeout=30):
+        self.base_url = base_url if base_url.endswith(&quot;/&quot;) else base_url + &quot;/&quot;
+        self.timeout = timeout
+        self._auth = None
+        if username:
+            raw = &quot;%s:%s&quot; % (username, password or &quot;&quot;)
+            self._auth = &quot;Basic &quot; + base64.b64encode(raw.encode(&quot;utf-8&quot;)).decode(&quot;ascii&quot;)
+        self._base_path = urlparse(self.base_url).path
+        # 显式绕过系统代理，保证本地/内网服务器可达
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    # -- 基础请求 ------------------------------------------------------------
+    def _url(self, rel):
+        rel = (rel or &quot;&quot;).strip(&quot;/&quot;)
+        return self.base_url + quote(rel, safe=&quot;/&quot;) if rel else self.base_url
+
+    def _raw(self, method, rel, data=None, headers=None):
+        h = dict(headers or {})
+        if self._auth:
+            h[&quot;Authorization&quot;] = self._auth
+        req = urllib.request.Request(self._url(rel), data=data, method=method, headers=h)
+        try:
+            with self.opener.open(req, timeout=self.timeout) as resp:
+                return resp.status, resp.read(), dict(resp.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), dict(e.headers)
+
+    # -- 目录/文件操作 -------------------------------------------------------
+    def stat_dir(self, rel):
+        &quot;&quot;&quot;PROPFIND Depth=1，返回 {relpath: FileInfo}（不含自身）；目录不存在返回 None。&quot;&quot;&quot;
+        status, body, _ = self._raw(
+            &quot;PROPFIND&quot;, rel, data=PROPFIND_BODY,
+            headers={&quot;Depth&quot;: &quot;1&quot;, &quot;Content-Type&quot;: &quot;application/xml&quot;},
+        )
+        if status == 404:
+            return None
+        if status not in (200, 207):
+            raise SyncError(&quot;PROPFIND %s: HTTP %s&quot; % (rel or &quot;/&quot;, status))
+        return self._parse(body, rel)
+
+    def walk(self):
+        &quot;&quot;&quot;递归列出远端全部文件，返回 {relpath: FileInfo}。&quot;&quot;&quot;
+        files, seen, stack = {}, set(), [&quot;&quot;]
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            entries = self.stat_dir(cur)
+            if entries is None:
+                continue
+            for path, info in entries.items():
+                if info.is_dir:
+                    stack.append(path)
+                else:
+                    files[path] = info
+        return files
+
+    def download(self, rel, dest_path):
+        h = {}
+        if self._auth:
+            h[&quot;Authorization&quot;] = self._auth
+        req = urllib.request.Request(self._url(rel), method=&quot;GET&quot;, headers=h)
+        try:
+            with self.opener.open(req, timeout=self.timeout) as resp, open(dest_path, &quot;wb&quot;) as f:
+                shutil.copyfileobj(resp, f)
+        except urllib.error.HTTPError as e:
+            raise SyncError(&quot;GET %s: HTTP %s&quot; % (rel, e.code)) from None
+
+    def upload(self, rel, local_path):
+        with open(local_path, &quot;rb&quot;) as f:
+            data = f.read()
+        status, _, _ = self._raw(
+            &quot;PUT&quot;, rel, data=data,
+            headers={&quot;Content-Type&quot;: &quot;application/octet-stream&quot;},
+        )
+        if status not in (200, 201, 204):
+            raise SyncError(&quot;PUT %s: HTTP %s&quot; % (rel, status))
+
+    def ensure_dir(self, rel):
+        &quot;&quot;&quot;逐级 MKCOL，保证远端目录存在（已存在时服务器返回 405，视为成功）。&quot;&quot;&quot;
+        cur = &quot;&quot;
+        for part in [p for p in rel.split(&quot;/&quot;) if p]:
+            cur = &quot;%s/%s&quot; % (cur, part) if cur else part
+            status, _, _ = self._raw(&quot;MKCOL&quot;, cur)
+            if status not in (200, 201, 405):
+                raise SyncError(&quot;MKCOL %s: HTTP %s&quot; % (cur, status))
+
+    def delete(self, rel):
+        status, _, _ = self._raw(&quot;DELETE&quot;, rel)
+        if status not in (200, 202, 204, 404):
+            raise SyncError(&quot;DELETE %s: HTTP %s&quot; % (rel, status))
+
+    # -- PROPFIND 响应解析 ---------------------------------------------------
+    def _rel(self, href):
+        path = urlparse(href).path if &quot;://&quot; in href else href
+        path = unquote(path)
+        bp = self._base_path
+        if bp and path.startswith(bp):
+            path = path[len(bp):]
+        else:
+            bp2 = bp.rstrip(&quot;/&quot;)
+            if bp2 and path.startswith(bp2):
+                path = path[len(bp2):]
+        return path.strip(&quot;/&quot;)
+
+    def _parse(self, body, parent):
+        out = {}
+        root = ET.fromstring(body)
+        parent = (parent or &quot;&quot;).strip(&quot;/&quot;)
+        for resp in root.iter(DAV + &quot;response&quot;):
+            href = resp.find(DAV + &quot;href&quot;)
+            if href is None or not href.text:
+                continue
+            rel = self._rel(href.text.strip())
+            if not rel or rel == parent:
+                continue
+            info = FileInfo(rel)
+            for ps in resp.findall(DAV + &quot;propstat&quot;):
+                st = ps.find(DAV + &quot;status&quot;)
+                if st is not None and &quot;200&quot; not in (st.text or &quot;&quot;):
+                    continue
+                prop = ps.find(DAV + &quot;prop&quot;)
+                if prop is None:
+                    continue
+                rt = prop.find(DAV + &quot;resourcetype&quot;)
+                if rt is not None and rt.find(DAV + &quot;collection&quot;) is not None:
+                    info.is_dir = True
+                el = prop.find(DAV + &quot;getcontentlength&quot;)
+                if el is not None and el.text and el.text.isdigit():
+                    info.size = int(el.text)
+                el = prop.find(DAV + &quot;getlastmodified&quot;)
+                if el is not None and el.text:
+                    try:
+                        info.mtime = parsedate_to_datetime(el.text).timestamp()
+                    except (TypeError, ValueError):
+                        pass
+                el = prop.find(DAV + &quot;getetag&quot;)
+                if el is not None and el.text:
+                    info.etag = el.text.strip().strip(&#x27;&quot;&#x27;)
+            out[rel] = info
+        return out
+
+
+# ---------------------------------------------------------------------------
+# 同步器
+# ---------------------------------------------------------------------------
+class Syncer:
+    def __init__(self, cfg, verbose=False):
+        self.cfg = cfg
+        self.verbose = verbose
+        self.local_dir = os.path.abspath(cfg[&quot;local_dir&quot;])
+        if not os.path.isdir(self.local_dir):
+            raise SyncError(&quot;本地目录不存在: %s&quot; % self.local_dir)
+        # 配置文件若位于 local_dir 内，自动排除，避免凭据被上传
+        cp = cfg.get(&quot;_config_path&quot;)
+        if cp:
+            try:
+                rel = os.path.relpath(cp, self.local_dir)
+            except ValueError:
+                rel = None
+            if rel and not rel.startswith(&quot;..&quot;):
+                ig = self.cfg.setdefault(&quot;ignore&quot;, [])
+                if rel not in ig:
+                    ig.append(rel)
+        self.client = WebDAVClient(
+            cfg[&quot;_base_url&quot;],
+            cfg.get(&quot;username&quot;) or None,
+            cfg.get(&quot;password&quot;) or None,
+            cfg.get(&quot;timeout&quot;) or 30,
+        )
+        self.state_path = cfg.get(&quot;state_file&quot;) or &quot;.davsync.json&quot;
+        if not os.path.isabs(self.state_path):
+            self.state_path = os.path.join(self.local_dir, self.state_path)
+        # 状态文件本身永远不同步（此前会被上传到远端，属无意义且危险的行为）
+        srel = os.path.relpath(self.state_path, self.local_dir)
+        if not srel.startswith(&quot;..&quot;):
+            ig = self.cfg.setdefault(&quot;ignore&quot;, [])
+            if srel not in ig:
+                ig.append(srel)
+        self.state = self._load_state()
+        self.failed = set()
+
+    # -- 状态 ----------------------------------------------------------------
+    def _load_state(self):
+        if os.path.isfile(self.state_path):
+            try:
+                with open(self.state_path, encoding=&quot;utf-8&quot;) as f:
+                    return json.load(f)
+            except (OSError, ValueError):
+                print(&quot;警告: 状态文件损坏，将重建: %s&quot; % self.state_path, file=sys.stderr)
+        return {}
+
+    def _save_state(self):
+        tmp = self.state_path + &quot;.tmp&quot;
+        os.makedirs(os.path.dirname(self.state_path) or &quot;.&quot;, exist_ok=True)
+        with open(tmp, &quot;w&quot;, encoding=&quot;utf-8&quot;) as f:
+            json.dump(self.state, f, ensure_ascii=False, indent=1, sort_keys=True)
+        os.replace(tmp, self.state_path)
+
+    # -- 扫描 ----------------------------------------------------------------
+    def scan_local(self):
+        &quot;&quot;&quot;返回 {relpath: (mtime, size)}，按配置剪枝忽略目录。&quot;&quot;&quot;
+        out = {}
+        for dirpath, dirnames, filenames in os.walk(self.local_dir):
+            rel_dir = os.path.relpath(dirpath, self.local_dir)
+            if rel_dir == &quot;.&quot;:
+                rel_dir = &quot;&quot;
+            dirnames[:] = [
+                d for d in dirnames
+                if not self.is_ignored(self._join(rel_dir, d))
+            ]
+            for fn in filenames:
+                rel = self._join(rel_dir, fn)
+                if self.is_ignored(rel):
+                    continue
+                st = os.stat(os.path.join(dirpath, fn))
+                out[rel] = (st.st_mtime, st.st_size)
+        return out
+
+    @staticmethod
+    def _join(rel_dir, name):
+        return &quot;%s/%s&quot; % (rel_dir, name) if rel_dir else name
+
+    def scan_remote(self):
+        return self.client.walk()
+
+    def is_ignored(self, rel):
+        parts = rel.split(&quot;/&quot;)
+        for pat in self.cfg.get(&quot;ignore&quot;) or []:
+            p = str(pat).strip().strip(&quot;/&quot;)
+            if not p:
+                continue
+            if &quot;*&quot; in p or &quot;?&quot; in p or &quot;[&quot; in p:
+                if fnmatch.fnmatch(rel, p):
+                    return True
+                if any(fnmatch.fnmatch(part, p) for part in parts):
+                    return True
+                if p.endswith(&quot;/**&quot;) and rel.startswith(p[:-2]):
+                    return True
+            else:
+                if p in parts or rel == p:
+                    return True
+        return False
+
+    # -- 变化签名 ------------------------------------------------------------
+    @staticmethod
+    def _l_sig(l):
+        return (round(l[0], 3), l[1])
+
+    @staticmethod
+    def _state_l_sig(s):
+        sl = s.get(&quot;l&quot;) if s else None
+        if not sl:
+            return None
+        return (round(sl[0], 3), sl[1])
+
+    @staticmethod
+    def _r_sig(r):
+        return (int(r.mtime) if r.mtime is not None else None, r.size, r.etag)
+
+    # -- 计划 ----------------------------------------------------------------
+    def plan(self):
+        self._local = self.scan_local()
+        self._remote = self.scan_remote()
+        actions = []
+        for rel in sorted(set(self._local) | set(self._remote) | set(self.state)):
+            if self.is_ignored(rel):
+                continue
+            l = self._local.get(rel)
+            r = self._remote.get(rel)
+            s = self.state.get(rel)
+            if l and r:
+                if s:
+                    l_changed = self._l_sig(l) != self._state_l_sig(s)
+                    r_changed = self._r_sig(r) != tuple(s.get(&quot;r&quot;) or ())
+                else:
+                    # 首次同步且两端内容明显一致 -&gt; 直接记为已同步
+                    if (l[1] == r.size and r.mtime is not None
+                            and abs(l[0] - r.mtime) &lt;= 2):
+                        actions.append((&quot;ok&quot;, rel, &quot;首次同步: 识别为相同文件&quot;))
+                        continue
+                    l_changed = r_changed = True
+                if l_changed and r_changed:
+                    actions.append(self._conflict(rel, l, r))
+                elif l_changed:
+                    actions.append((&quot;upload&quot;, rel))
+                elif r_changed:
+                    actions.append((&quot;download&quot;, rel))
+                else:
+                    actions.append((&quot;ok&quot;, rel))
+            elif l:
+                if s and s.get(&quot;r&quot;):
+                    if self.cfg.get(&quot;propagate_delete&quot;, True):
+                        actions.append((&quot;delete_local&quot;, rel, &quot;远端已删除&quot;))
+                    else:
+                        actions.append((&quot;upload&quot;, rel, &quot;远端已删除, 重新上传&quot;))
+                else:
+                    actions.append((&quot;upload&quot;, rel, &quot;新增&quot;))
+            elif r:
+                if s and s.get(&quot;l&quot;):
+                    if self.cfg.get(&quot;propagate_delete&quot;, True):
+                        actions.append((&quot;delete_remote&quot;, rel, &quot;本地已删除&quot;))
+                    else:
+                        actions.append((&quot;download&quot;, rel, &quot;本地已删除, 重新下载&quot;))
+                else:
+                    actions.append((&quot;download&quot;, rel, &quot;新增&quot;))
+            else:
+                if s:
+                    actions.append((&quot;forget&quot;, rel))
+        return actions
+
+    def _conflict(self, rel, l, r):
+        policy = self.cfg.get(&quot;conflict_policy&quot;, &quot;newer&quot;)
+        if policy == &quot;error&quot;:
+            return (&quot;conflict&quot;, rel, &quot;两端均已修改, 请手动处理&quot;)
+        if policy == &quot;local&quot;:
+            return (&quot;upload&quot;, rel, &quot;冲突: 本地优先&quot;)
+        if policy == &quot;remote&quot;:
+            return (&quot;download&quot;, rel, &quot;冲突: 远端优先&quot;)
+        if policy == &quot;both&quot;:
+            return (&quot;keep_both&quot;, rel, &quot;冲突: 保留两份&quot;)
+        # newer
+        lm, rm = l[0], r.mtime or 0.0
+        note = &quot;冲突: 较新者胜 (本地 %s vs 远端 %s)&quot; % (self._ts(lm), self._ts(rm))
+        return (&quot;upload&quot;, rel, note) if lm &gt;= rm else (&quot;download&quot;, rel, note)
+
+    @staticmethod
+    def _ts(t):
+        return datetime.fromtimestamp(t).strftime(&quot;%m-%d %H:%M:%S&quot;) if t else &quot;-&quot;
+
+    # -- 执行 ----------------------------------------------------------------
+    def execute(self, actions):
+        stats = {k: 0 for k in LABEL}
+        for act in actions:
+            kind, rel = act[0], act[1]
+            note = act[2] if len(act) &gt; 2 else &quot;&quot;
+            if kind == &quot;ok&quot;:
+                if self.verbose:
+                    print(&quot;  = 跳过 %s&quot; % rel)
+                continue
+            if kind == &quot;forget&quot;:
+                stats[kind] += 1
+                continue
+            if kind == &quot;conflict&quot;:
+                self.failed.add(rel)
+                stats[kind] += 1
+                print(&quot;  ! 冲突未处理: %s (%s)&quot; % (rel, note), file=sys.stderr)
+                continue
+            try:
+                if kind == &quot;upload&quot;:
+                    parent = posixpath.dirname(rel)
+                    if parent:
+                        self.client.ensure_dir(parent)
+                    self.client.upload(rel, os.path.join(self.local_dir, rel))
+                    print(&quot;  ↑ 上传 %s%s&quot; % (rel, self._note(note)))
+                elif kind == &quot;download&quot;:
+                    self._download(rel, rel)
+                    print(&quot;  ↓ 下载 %s%s&quot; % (rel, self._note(note)))
+                elif kind == &quot;keep_both&quot;:
+                    base, ext = posixpath.splitext(rel)
+                    stamp = time.strftime(&quot;%Y%m%d-%H%M%S&quot;)
+                    conflict_rel = &quot;%s.conflict-%s%s&quot; % (base, stamp, ext)
+                    self._download(rel, conflict_rel)
+                    parent = posixpath.dirname(rel)
+                    if parent:
+                        self.client.ensure_dir(parent)
+                    self.client.upload(rel, os.path.join(self.local_dir, rel))
+                    print(&quot;  ⇅ 冲突保留两份: %s + %s&quot; % (rel, conflict_rel))
+                elif kind == &quot;delete_local&quot;:
+                    os.remove(os.path.join(self.local_dir, rel))
+                    print(&quot;  × 删除本地 %s%s&quot; % (rel, self._note(note)))
+                elif kind == &quot;delete_remote&quot;:
+                    self.client.delete(rel)
+                    print(&quot;  × 删除远端 %s%s&quot; % (rel, self._note(note)))
+                stats[kind] += 1
+            except Exception as e:  # 单文件失败不影响其他文件
+                self.failed.add(rel)
+                print(&quot;  ✗ 失败 %s: %s&quot; % (rel, e), file=sys.stderr)
+        self._rebuild_state()
+        return stats
+
+    @staticmethod
+    def _note(note):
+        return &quot;  (%s)&quot; % note if note else &quot;&quot;
+
+    def _download(self, rel, dest_rel):
+        &quot;&quot;&quot;先写临时文件再原子替换；成功后把本地 mtime 设为远端 mtime，保证状态稳定。&quot;&quot;&quot;
+        info = self._remote.get(rel)
+        dest = os.path.join(self.local_dir, dest_rel)
+        os.makedirs(os.path.dirname(dest) or &quot;.&quot;, exist_ok=True)
+        tmp = dest + &quot;.davsync.part&quot;
+        try:
+            self.client.download(rel, tmp)
+            os.replace(tmp, dest)
+        except Exception:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise
+        if info and info.mtime is not None:
+            os.utime(dest, (info.mtime, info.mtime))
+
+    def _rebuild_state(self):
+        &quot;&quot;&quot;执行后重新扫描两端，重建状态；失败项保留旧状态以便下次重试。&quot;&quot;&quot;
+        try:
+            local = self.scan_local()
+        except OSError:
+            local = {}
+        try:
+            remote = self.scan_remote()
+        except Exception:
+            remote = {}
+        new_state = {}
+        for rel in set(local) | set(remote):
+            if rel in self.failed:
+                if rel in self.state:
+                    new_state[rel] = self.state[rel]
+                continue
+            entry = {}
+            entry[&quot;l&quot;] = [local[rel][0], local[rel][1]] if rel in local else None
+            if rel in remote:
+                r = remote[rel]
+                entry[&quot;r&quot;] = [r.mtime, r.size, r.etag]
+            else:
+                entry[&quot;r&quot;] = None
+            new_state[rel] = entry
+        self.state = new_state
+        self._save_state()
+
+
+# ---------------------------------------------------------------------------
+# 配置与 CLI
+# ---------------------------------------------------------------------------
+def _expand_env(value):
+    if not isinstance(value, str):
+        return value
+    return re.sub(r&quot;\$\{(\w+)\}&quot;, lambda m: os.environ.get(m.group(1), &quot;&quot;), value)
+
+
+def load_config(path):
+    with open(path, encoding=&quot;utf-8&quot;) as f:
+        user = json.load(f)
+    if not isinstance(user, dict):
+        raise SyncError(&quot;配置文件必须是 JSON 对象&quot;)
+    cfg = dict(DEFAULT_CONFIG)
+    cfg.update(user)
+    cfg[&quot;_config_path&quot;] = os.path.abspath(path)
+    # local_dir 留空或为 &quot;.&quot; 时，默认跟随配置文件所在目录
+    if not cfg.get(&quot;local_dir&quot;) or cfg[&quot;local_dir&quot;] in (&quot;.&quot;, &quot;./&quot;):
+        cfg[&quot;local_dir&quot;] = os.path.dirname(cfg[&quot;_config_path&quot;]) or &quot;.&quot;
+    env_name = cfg.get(&quot;password_env&quot;)
+    if env_name and env_name in os.environ:
+        cfg[&quot;password&quot;] = os.environ[env_name]
+    for key in (&quot;url&quot;, &quot;username&quot;, &quot;password&quot;, &quot;local_dir&quot;, &quot;remote_dir&quot;):
+        cfg[key] = _expand_env(cfg.get(key) or &quot;&quot;)
+    if not cfg[&quot;url&quot;]:
+        raise SyncError(&quot;配置缺少 url&quot;)
+    if not cfg[&quot;local_dir&quot;]:
+        raise SyncError(&quot;配置缺少 local_dir&quot;)
+    if cfg.get(&quot;conflict_policy&quot;) not in CONFLICT_POLICIES:
+        raise SyncError(&quot;conflict_policy 必须是: %s&quot; % &quot;/&quot;.join(CONFLICT_POLICIES))
+    base = cfg[&quot;url&quot;].rstrip(&quot;/&quot;)
+    rd = (cfg.get(&quot;remote_dir&quot;) or &quot;&quot;).strip(&quot;/&quot;)
+    if rd:
+        base += &quot;/&quot; + quote(rd, safe=&quot;/&quot;)
+    cfg[&quot;_base_url&quot;] = base + &quot;/&quot;
+    return cfg
+
+
+def _fmt_action(act):
+    kind, rel = act[0], act[1]
+    note = act[2] if len(act) &gt; 2 else &quot;&quot;
+    return &quot;%s %s%s&quot; % (LABEL.get(kind, kind), rel, (&quot;  (%s)&quot; % note) if note else &quot;&quot;)
+
+
+def _print_pending(actions, verbose):
+    pending = [a for a in actions if a[0] != &quot;ok&quot;]
+    if not pending:
+        print(&quot;✓ 两端一致，无需同步&quot;)
+        return 0
+    print(&quot;待同步 %d 项:&quot; % len(pending))
+    for a in pending:
+        print(&quot;  &quot; + _fmt_action(a))
+    return 0
+
+
+def _run_hook(cmd, name, cwd=None):
+    &quot;&quot;&quot;执行用户自定义前/后置 shell 命令；失败抛 SyncError 中止同步。&quot;&quot;&quot;
+    import subprocess
+    print(&quot;▶ %s: %s&quot; % (name, cmd))
+    r = subprocess.run(cmd, shell=True, cwd=cwd)
+    if r.returncode != 0:
+        raise SyncError(&quot;%s 失败（退出码 %d）: %s&quot; % (name, r.returncode, cmd))
+
+
+def cmd_sync(cfg, dry_run=False, verbose=False, force=False):
+    pre = (cfg.get(&quot;pre_command&quot;) or &quot;&quot;).strip()
+    if pre and not dry_run:
+        _run_hook(pre, &quot;前置命令&quot;, cwd=cfg.get(&quot;local_dir&quot;) or None)
+    syncer = Syncer(cfg, verbose=verbose)
+    print(&quot;本地: %s&quot; % syncer.local_dir)
+    print(&quot;远端: %s&quot; % cfg[&quot;_base_url&quot;])
+    actions = syncer.plan()
+    # -- 大规模删除保护 ----------------------------------------------------
+    # 场景：对端目录被清空/重置（如服务器重建、测试目录被清理），而本地仍在。
+    # 此时&quot;对端删除&quot;会被传播到本地，等于一次误删全部文件。此处按比例拦截。
+    dels = [a for a in actions if a[0] in (&quot;delete_local&quot;, &quot;delete_remote&quot;)]
+    tracked = len(syncer.state)
+    suspicious = (len(dels) &gt;= 2 and tracked &gt; 0
+                  and len(dels) &gt;= max(2, tracked // 2))
+    if dels and suspicious and not (force or cfg.get(&quot;allow_mass_delete&quot;)):
+        msg = (&quot;检测到大规模删除（%d 项，占已跟踪文件 %d 项的半数以上），&quot;
+               &quot;疑似对端数据丢失。为保护本地数据已中止同步。\n&quot;
+               &quot;  - 若确认要删除: 在配置中设 \&quot;allow_mass_delete\&quot;: true，&quot;
+               &quot;或运行时加 --force\n&quot;
+               &quot;  - 若是误报(如更换了远端目录): 先核对 url/remote_dir 是否正确&quot;
+               % (len(dels), tracked))
+        if dry_run:
+            print(&quot;⚠ %s\n[模拟运行] 本次将删除:&quot; % msg)
+            for a in dels:
+                print(&quot;  &quot; + _fmt_action(a))
+        else:
+            raise SyncError(msg)
+    pending = [a for a in actions if a[0] != &quot;ok&quot;]
+    if not pending:
+        print(&quot;✓ 两端一致，无需同步&quot;)
+        return 0
+    if dry_run:
+        print(&quot;[模拟运行] 将执行 %d 项操作:&quot; % len(pending))
+        for a in pending:
+            print(&quot;  &quot; + _fmt_action(a))
+        return 0
+    print(&quot;开始同步，共 %d 项操作:&quot; % len(pending))
+    stats = syncer.execute(actions)
+    summary = &quot;, &quot;.join(&quot;%s %d&quot; % (LABEL[k], v) for k, v in stats.items() if v)
+    print(&quot;完成: %s&quot; % (summary or &quot;无操作&quot;))
+    if syncer.failed:
+        print(&quot;⚠ %d 项失败，状态已保留，下次运行自动重试&quot; % len(syncer.failed), file=sys.stderr)
+        return 1
+    post = (cfg.get(&quot;post_command&quot;) or &quot;&quot;).strip()
+    if post and not dry_run:
+        _run_hook(post, &quot;后置命令&quot;, cwd=cfg.get(&quot;local_dir&quot;) or None)
+    return 0
+
+
+def cmd_status(cfg, verbose=False):
+    syncer = Syncer(cfg, verbose=verbose)
+    return _print_pending(syncer.plan(), verbose)
+
+
+def cmd_init(path):
+    if os.path.exists(path):
+        print(&quot;配置文件已存在: %s&quot; % path)
+        return 1
+    template = {
+        &quot;url&quot;: &quot;https://dav.example.com/dav/&quot;,
+        &quot;username&quot;: &quot;your_username&quot;,
+        &quot;password&quot;: &quot;&quot;,
+        &quot;password_env&quot;: &quot;DAVSYNC_PASSWORD&quot;,
+        &quot;local_dir&quot;: &quot;./notes&quot;,
+        &quot;remote_dir&quot;: &quot;notes&quot;,
+        &quot;ignore&quot;: DEFAULT_CONFIG[&quot;ignore&quot;],
+        &quot;conflict_policy&quot;: &quot;newer&quot;,
+        &quot;propagate_delete&quot;: True,
+        &quot;allow_mass_delete&quot;: False,
+        &quot;state_file&quot;: &quot;.davsync.json&quot;,
+        &quot;timeout&quot;: 30,
+        &quot;pre_command&quot;: &quot;&quot;,
+        &quot;post_command&quot;: &quot;&quot;,
+    }
+    with open(path, &quot;w&quot;, encoding=&quot;utf-8&quot;) as f:
+        json.dump(template, f, ensure_ascii=False, indent=2)
+        f.write(&quot;\n&quot;)
+    print(&quot;已生成示例配置 %s，编辑后执行: python davsync.py sync -c %s&quot; % (path, path))
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog=&quot;davsync&quot;, description=&quot;DavSync —— 零依赖 WebDAV 双向同步器&quot;
+    )
+    sub = parser.add_subparsers(dest=&quot;command&quot;)
+
+    p_init = sub.add_parser(&quot;init&quot;, help=&quot;生成示例配置文件&quot;)
+    p_init.add_argument(&quot;path&quot;, nargs=&quot;?&quot;, default=&quot;davsync.json&quot;)
+
+    for name, help_text in ((&quot;sync&quot;, &quot;执行双向同步&quot;), (&quot;status&quot;, &quot;查看待同步项&quot;)):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument(&quot;-c&quot;, &quot;--config&quot;, default=&quot;davsync.json&quot;, help=&quot;配置文件路径&quot;)
+        p.add_argument(&quot;--dry-run&quot;, action=&quot;store_true&quot;, help=&quot;只显示将执行的操作&quot;)
+        p.add_argument(&quot;-v&quot;, &quot;--verbose&quot;, action=&quot;store_true&quot;, help=&quot;显示全部文件(含跳过项)&quot;)
+        p.add_argument(&quot;--force&quot;, action=&quot;store_true&quot;,
+                       help=&quot;越过大规模删除保护强制执行&quot;)
+
+    args = parser.parse_args(argv)
+    if not args.command:
+        parser.print_help()
+        return 2
+    try:
+        if args.command == &quot;init&quot;:
+            return cmd_init(args.path)
+        cfg = load_config(args.config)
+        if args.command == &quot;status&quot;:
+            return cmd_status(cfg, verbose=args.verbose)
+        return cmd_sync(cfg, dry_run=args.dry_run, verbose=args.verbose,
+                        force=getattr(args, &quot;force&quot;, False))
+    except SyncError as e:
+        print(&quot;错误: %s&quot; % e, file=sys.stderr)
+        return 1
+    except FileNotFoundError as e:
+        print(&quot;错误: 文件不存在 %s&quot; % e, file=sys.stderr)
+        return 1
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+</code></pre></details>
+</body></html>

@@ -46,7 +46,7 @@ static void ensure_data_dir(const std::string& db_path) {
 
 static void print_help() {
     std::cout <<
-        "cpp-todo " << kVersion << " — 本机 C++ 待办应用（SQLite，零账号零安装）\n\n"
+        "todo " << kVersion << " — 本机 C++ 待办应用（SQLite，零账号零安装）\n\n"
         "用法: todo <命令> [选项]\n\n"
         "服务:\n"
         "  serve [--port N] [--db PATH] [--open]   启动本地服务并打开 Web 界面\n"
@@ -754,7 +754,7 @@ static void reminder_thread(Db* pdb, std::atomic<bool>* running) {
                 std::string key = today + "|" + r.get("id") + "|" + r.get("remind_time");
                 if (notified.count(key)) continue;
                 notified.insert(key);
-                send_notification("cpp-todo 提醒",
+                send_notification("todo 提醒",
                                   r.get("title") + " ⏰ " + r.get("remind_time"));
             }
         } catch (...) {}
@@ -834,7 +834,7 @@ static int cmd_serve(Db& db, const Options& opt) {
         std::cerr << "启动失败：端口 " << opt.port << " 被占用或不可用\n";
         return 1;
     }
-    std::cout << "✓ cpp-todo 服务已启动（零账号 · 数据仅存本机）\n";
+    std::cout << "✓ todo 服务已启动（零账号 · 数据仅存本机）\n";
     std::cout << "  地址: http://127.0.0.1:" << opt.port << "/\n";
     std::cout << "  数据库: " << opt.db_path << "\n";
     std::cout << "  按 Ctrl+C 停止\n\n";

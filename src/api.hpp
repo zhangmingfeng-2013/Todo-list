@@ -17,6 +17,8 @@ private:
     HttpResponse handle_storage(const HttpRequest& req);          // GET 当前存储信息
     HttpResponse handle_storage_volumes(const HttpRequest& req);  // GET 可用卷列表
     HttpResponse handle_storage_move(const HttpRequest& req);     // POST 迁移数据库
+    HttpResponse handle_webdav_config(const HttpRequest& req); // GET/PUT WebDAV 配置
+    HttpResponse handle_webdav_sync(const HttpRequest& req);   // POST 触发 WebDAV 同步
     HttpResponse handle_tasks(const HttpRequest& req);
     HttpResponse handle_task_detail(const HttpRequest& req, long long id);
     HttpResponse handle_task_update(const HttpRequest& req, long long id);
