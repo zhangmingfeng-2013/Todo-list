@@ -7,3 +7,7 @@ date/
 build/CMakeFiles
 build/.cmake
 todo-export-2026-08-25.todotxt
+cpp-todo.app
+*.db
+*.db-wal
+*.db-shm

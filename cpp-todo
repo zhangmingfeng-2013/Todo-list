@@ -1,0 +1,5 @@
+#!/bin/bash
+# 一键启动 cpp-todo 桌面应用
+set -e
+cd "$(dirname "$0")"
+open ./cpp-todo.app
