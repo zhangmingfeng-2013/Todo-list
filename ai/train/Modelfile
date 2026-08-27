@@ -1,7 +1,18 @@
-# 将自训导出的 GGUF 注册为本地 Ollama 模型，供 AI 服务离线调用。
-# 用法：ollama create cpp-todo-ai -f Modelfile
+# ============================================================
+# Ollama + GGUF 注册配方（可选路线，非当前默认）
+# ============================================================
+# 重要：mlx-lm 0.31.3 已移除 gguf CLI，且其 GGUF 辅助库声明
+# "Conversion of quantized models is not yet supported"。
+# 因此 4bit MLX 基座微调后无法直接导出 GGUF。
+#
+# 当前默认离线闭环 = mlx_lm.server 直接服务融合模型（见 serve_trained.sh），
+# AI 服务 base_url 默认 127.0.0.1:8080/v1 即自动对接，无需本文件。
+#
+# 若坚持要 Ollama+GGUF，需改用「全精度 PyTorch(PEFT) 微调 -> 合并 ->
+# llama.cpp convert_hf_to_gguf.py 导出 GGUF」路线，导出后把下面
+# FROM 指向真实 GGUF 路径再执行：ollama create cpp-todo-ai -f Modelfile
+# ============================================================
 
-FROM ./ai/train/model.gguf
+# FROM ./ai/train/model.gguf   # <- 当前不存在；走全精度+llama.cpp 路线后启用
 
-# 系统提示：保持与 prompts.py 一致的「只输出 JSON」约束
 SYSTEM """你是一个任务管理 AI，负责拆解目标、抽取待办、动态排序、预判待办。始终只输出 JSON。"""

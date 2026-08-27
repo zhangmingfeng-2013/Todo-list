@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(cpp-todo C CXX)
 
+# AI 网关（ai/cpp/ai_gateway.cpp）需要 libcurl 转发到本地 AI 服务
+find_package(CURL REQUIRED)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -21,10 +24,11 @@ add_executable(todo
   src/storage.cpp
   src/exporter.cpp
   src/backup.cpp
+  ai/cpp/ai_gateway.cpp
   vendor/sqlite3.c
 )
 
-target_include_directories(todo PRIVATE src vendor)
+target_include_directories(todo PRIVATE src vendor ai/cpp)
 target_compile_definitions(todo PRIVATE SQLITE_THREADSAFE=1 SQLITE_DEFAULT_FOREIGN_KEYS=1)
 
 if(APPLE)
@@ -44,10 +48,17 @@ else()
   target_link_libraries(todo PRIVATE pthread dl)
 endif()
 
+# AI 网关依赖 libcurl
+target_link_libraries(todo PRIVATE CURL::libcurl)
+
 # Web 资源拷贝到构建目录，方便从任意 cwd 启动
-add_custom_command(TARGET todo POST_BUILD
+# 独立 custom target（ALL + DEPENDS web 文件），使 web/ 变更能触发复制；
+# 直接用 CMAKE_BINARY_DIR 避免对 todo 目标的循环依赖。
+file(GLOB_RECURSE CPP_TODO_WEB_FILES ${CMAKE_CURRENT_SOURCE_DIR}/web/*)
+add_custom_target(web_copy ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           ${CMAKE_CURRENT_SOURCE_DIR}/web
-          $<TARGET_FILE_DIR:todo>/web
+          ${CMAKE_BINARY_DIR}/web
+  DEPENDS ${CPP_TODO_WEB_FILES}
   COMMENT "复制 Web 静态资源"
 )

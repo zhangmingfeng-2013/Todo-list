@@ -36,3 +36,17 @@ std::string AiGateway::post(const std::string& path, const std::string& json_bod
     curl_easy_cleanup(c);
     return rc == CURLE_OK ? resp : "";
 }
+
+std::string AiGateway::get(const std::string& path) {
+    std::string url = base_url_ + path;
+    std::string resp;
+    CURL* c = curl_easy_init();
+    if (!c) return "";
+    curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &resp);
+    CURLcode rc = curl_easy_perform(c);
+    curl_easy_cleanup(c);
+    return rc == CURLE_OK ? resp : "";
+}

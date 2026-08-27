@@ -73,7 +73,7 @@ Web 界面一键包装为原生桌面窗口（系统 WKWebView，无需打包浏
 ./run-gui.sh             # 方式 B：直接 Python 启动（开发调试，首次自动创建 .venv 并安装 pywebview）
 ```
 
-依赖 Python 3.9+（仅方式 B）；后端端口被占用时自动复用已有服务。详见 `gui/`。
+依赖 Python 3.10+（仅方式 B）；后端端口被占用时自动复用已有服务。详见 `gui/`。
 
 ## 数据与同步
 
@@ -87,7 +87,7 @@ Web 界面一键包装为原生桌面窗口（系统 WKWebView，无需打包浏
 
 两种方式将数据同步到自建 WebDAV 服务器（坚果云、Nextcloud 等）：
 
-1. **Web 界面内置**：在设置中配置 WebDAV 并一键同步。服务端原生实现，同步前自动执行 WAL checkpoint，保证上传的主库文件是完整快照。
+1. **界面内置**：在设置中配置 WebDAV 并一键同步。服务端原生实现，同步前自动执行 WAL checkpoint，保证上传的主库文件是完整快照。
 2. **独立同步器 `webdav-sync/davsync.py`**：零第三方依赖（纯 Python 标准库），本地目录与 WebDAV 双向同步，基于三方比对（本地 / 上次快照 / 远端）判定上传、下载、冲突与删除传播，内置大规模删除保护与 `--dry-run`。
 
 同步策略、冲突处理与 SQLite WAL 注意事项详见 [`webdav-sync/README.md`](webdav-sync/README.md)。

@@ -352,6 +352,7 @@ async function switchView(v) {
     if (v === 'journal')   await renderJournal(content);
     if (v === 'gantt')     await renderGantt(content);
     if (v === 'trash')     await renderTrash(content);
+    if (v === 'ai')       await renderAI(content);
   } catch (e) {
     content.innerHTML = '<div class="loading"><span class="spin-ico"></span>加载失败：' + esc(e.message) + '</div>';
   }
@@ -3250,6 +3251,237 @@ function bindEvents() {
     if (c) closeModal();
     const s = e.target.closest('[data-act="sync-open"]');
     if (s) { closeModal(); openSyncModal(); }
+  });
+}
+
+/* ---------------- AI 助手视图 ---------------- */
+// 调用本地 AI 服务（经 C++ 网关 /api/ai/*）。返回解析后的 dict。
+async function aiCall(feature, body) {
+  return await api('POST', '/api/ai/' + feature, body);
+}
+
+// 将 AI 返回的 items 批量写入任务（inbox，status=todo）。
+async function aiAddAsTasks(items) {
+  const created = [];
+  for (const it of items) {
+    const payload = {
+      title: it.title || '（未命名）',
+      notes: it.note || '',
+      priority: typeof it.priority === 'number' ? it.priority : 1,
+      status: 'todo',
+      projectId: 0,
+      estMinutes: typeof it.estimated_minutes === 'number' ? it.estimated_minutes : 0,
+      tags: Array.isArray(it.tags) ? it.tags : []
+    };
+    if (it.due_date || it.due) payload.dueDate = it.due_date || it.due;
+    if (it.start_date) payload.startDate = it.start_date;
+    const r = await api('POST', '/api/tasks', payload);
+    created.push(r);
+  }
+  return created;
+}
+
+// 解析预测输入框文本为 [{title,date}]。每行格式: "YYYY-MM-DD 标题" 或仅 "标题"（默认今天+7天）。
+function aiParseEvents(text) {
+  const today = new Date();
+  const fallback = new Date(today.getTime() + 7 * 86400000);
+  const fb = fallback.toISOString().slice(0, 10);
+  return text.split('\n').map(l => l.trim()).filter(Boolean).map(line => {
+    const m = line.match(/^(\d{4}-\d{2}-\d{2})\s+(.+)$/);
+    return m ? { title: m[2], date: m[1] } : { title: line, date: fb };
+  });
+}
+
+async function renderAI(content) {
+  const head = viewHead('AI 智能助手', '本地 1B 模型 · 全离线 · 隐私闭环');
+  content.appendChild(head);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'ai-grid';
+
+  function card(title, desc, bodyHTML) {
+    const c = document.createElement('div');
+    c.className = 'card ai-card';
+    c.innerHTML =
+      '<div class="ai-card-head"><h3>' + esc(title) + '</h3><p>' + esc(desc) + '</p></div>' +
+      '<div class="ai-card-body">' + bodyHTML + '</div>' +
+      '<div class="ai-card-out" data-out></div>';
+    return c;
+  }
+
+  // 1) 任务拆解器
+  wrap.appendChild(card('① 任务拆解器', '输入大目标，AI 自动拆为带依赖与耗时估算的子任务。',
+    '<textarea class="ai-input" data-in="goal" placeholder="例如：完成项目报告"></textarea>' +
+    '<div class="ai-actions"><button class="btn btn-primary" data-act="ai-go">拆解</button></div>'));
+
+  // 2) 上下文抽取
+  wrap.appendChild(card('② 上下文智能补全', '粘贴网页/聊天/邮件片段，AI 提取核心待办，过滤废话。',
+    '<textarea class="ai-input" data-in="text" placeholder="粘贴任何文本，AI 自动抽取待办…"></textarea>' +
+    '<div class="ai-actions"><button class="btn btn-primary" data-act="ai-extract">提取待办</button></div>'));
+
+  // 3) 动态重排
+  wrap.appendChild(card('③ 动态优先级推演', '结合截止/耗时/当前任务池，AI 给出重排建议与可延后/舍弃项。',
+    '<p class="ai-hint">基于当前任务池分析（不含已完成/已归档）</p>' +
+    '<div class="ai-actions"><button class="btn btn-primary" data-act="ai-reprioritize">智能重排</button></div>'));
+
+  // 4) 任务预判
+  wrap.appendChild(card('④ 任务预判生成', '输入近期日程，AI 衍生需要提前准备的待办。',
+    '<textarea class="ai-input" data-in="events" placeholder="每行一个事件，可选日期前缀：&#10;2026-08-28 Q3 复盘会&#10;8/30 客户演示"></textarea>' +
+    '<div class="ai-actions"><button class="btn btn-primary" data-act="ai-predict">预判任务</button></div>'));
+
+  content.appendChild(wrap);
+
+  // 渲染单个输出
+  function renderOutput(card, data, feature) {
+    const out = card.querySelector('[data-out]');
+    out.innerHTML = '';
+    if (!data) return;
+    if (data.error) { out.innerHTML = '<div class="ai-err">' + esc(data.error) + '</div>'; return; }
+
+    if (feature === 'decompose' && Array.isArray(data.steps)) {
+      const list = document.createElement('div'); list.className = 'ai-list';
+      data.steps.forEach((s, i) => {
+        const dep = (s.depends_on || []).map(d => '#' + (d + 1)).join(' ');
+        const row = document.createElement('div'); row.className = 'ai-item';
+        row.innerHTML =
+          '<span class="ai-num">' + (i + 1) + '</span>' +
+          '<div class="ai-body"><div class="ai-title">' + esc(s.title) + '</div>' +
+          (s.note ? '<div class="ai-note">' + esc(s.note) + '</div>' : '') +
+          '<div class="ai-meta">⏱ ' + (s.estimated_minutes || '?') + ' 分钟' +
+          (dep ? '　🔗 依赖 ' + esc(dep) : '') + '</div></div>';
+        list.appendChild(row);
+      });
+      out.appendChild(list);
+      addAllButton(out, data.steps, '已添加 ' + data.steps.length);
+      return;
+    }
+    if (feature === 'extract' && Array.isArray(data.items)) {
+      const list = document.createElement('div'); list.className = 'ai-list';
+      data.items.forEach(it => {
+        const row = document.createElement('div'); row.className = 'ai-item';
+        row.innerHTML = '<span class="ai-num">•</span><div class="ai-body"><div class="ai-title">' + esc(it.title) + '</div>' +
+          (it.note ? '<div class="ai-note">' + esc(it.note) + '</div>' : '') + '</div>';
+        list.appendChild(row);
+      });
+      out.appendChild(list);
+      addAllButton(out, data.items, '已添加 ' + data.items.length);
+      return;
+    }
+    if (feature === 'predict' && Array.isArray(data.todos)) {
+      const list = document.createElement('div'); list.className = 'ai-list';
+      data.todos.forEach(it => {
+        const row = document.createElement('div'); row.className = 'ai-item';
+        row.innerHTML = '<span class="ai-num">•</span><div class="ai-body"><div class="ai-title">' + esc(it.title) + '</div>' +
+          (it.note ? '<div class="ai-note">' + esc(it.note) + '</div>' : '') +
+          '<div class="ai-meta">📅 ' + esc(it.due || '无日期') + '　⚑ ' + (it.priority === 2 ? '高' : it.priority === 1 ? '中' : '低') + '</div></div>';
+        list.appendChild(row);
+      });
+      out.appendChild(list);
+      addAllButton(out, data.todos, '已添加 ' + data.todos.length);
+      return;
+    }
+    if (feature === 'reprioritize') {
+      const rp = document.createElement('div'); rp.className = 'ai-rp';
+      if (Array.isArray(data.ordered) && data.ordered.length) {
+        const sec = document.createElement('div'); sec.className = 'ai-rp-section';
+        sec.insertAdjacentHTML('beforeend', '<h4>建议顺序</h4>');
+        data.ordered.forEach((o, i) => {
+          const task = S.taskIndex.get(o.id);
+          const title = task ? task.title : ('任务 #' + o.id);
+          const pri = o.predicted_priority;
+          sec.insertAdjacentHTML('beforeend',
+            '<div class="ai-rp-row"><span class="ai-num">' + (i + 1) + '</span>' +
+            '<span class="ai-title">' + esc(title) + '</span>' +
+            '<span class="ai-meta">⚑ ' + (pri >= 0.8 ? '高' : pri >= 0.4 ? '中' : '低') + '　' + esc(o.reason || '') + '</span></div>');
+        });
+        rp.appendChild(sec);
+      }
+      if (Array.isArray(data.postpone) && data.postpone.length) {
+        const sec = document.createElement('div'); sec.className = 'ai-rp-section';
+        sec.insertAdjacentHTML('beforeend', '<h4>📌 可延后</h4>');
+        data.postpone.forEach(id => {
+          const t = S.taskIndex.get(id);
+          sec.insertAdjacentHTML('beforeend', '<div class="ai-rp-row">📌 ' + esc(t ? t.title : '#' + id) + '</div>');
+        });
+        rp.appendChild(sec);
+      }
+      if (Array.isArray(data.drop) && data.drop.length) {
+        const sec = document.createElement('div'); sec.className = 'ai-rp-section';
+        sec.insertAdjacentHTML('beforeend', '<h4>🗑 可舍弃</h4>');
+        data.drop.forEach(id => {
+          const t = S.taskIndex.get(id);
+          sec.insertAdjacentHTML('beforeend', '<div class="ai-rp-row">🗑 ' + esc(t ? t.title : '#' + id) + '</div>');
+        });
+        rp.appendChild(sec);
+      }
+      if (!rp.childNodes.length) {
+        rp.insertAdjacentHTML('beforeend', '<p class="ai-hint">当前任务池无需调整。</p>');
+      }
+      out.appendChild(rp);
+      return;
+    }
+    // 回退：原始 JSON
+    out.innerHTML = '<pre class="ai-json">' + esc(JSON.stringify(data, null, 2)) + '</pre>';
+  }
+
+  function addAllButton(out, items, okMsg) {
+    if (!items.length) return;
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-primary ai-add-all';
+    btn.textContent = '全部添加为任务 (' + items.length + ')';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.textContent = '添加中…';
+      try {
+        await aiAddAsTasks(items);
+        toast(okMsg + ' 个任务', 'ok');
+        await refreshAll();
+      } catch (e) {
+        toast(e.message, 'err');
+        btn.disabled = false;
+        btn.textContent = '全部添加为任务 (' + items.length + ')';
+      }
+    });
+    out.appendChild(btn);
+  }
+
+  // 委托：卡片按钮 → 调用 AI
+  wrap.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const card = btn.closest('.ai-card');
+    const out = card.querySelector('[data-out]');
+    const act = btn.dataset.act;
+    const feature = act.replace('ai-', '');
+    btn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = '思考中…';
+    out.innerHTML = '<div class="ai-loading">调用本地模型（首次较慢）…</div>';
+    try {
+      let data;
+      if (act === 'ai-go') {
+        const goal = card.querySelector('[data-in="goal"]').value.trim();
+        if (!goal) throw new Error('请输入目标');
+        data = await aiCall('decompose', { goal });
+      } else if (act === 'ai-extract') {
+        const text = card.querySelector('[data-in="text"]').value.trim();
+        if (!text) throw new Error('请粘贴文本');
+        data = await aiCall('extract', { text });
+      } else if (act === 'ai-reprioritize') {
+        const tasks = Array.from(S.taskIndex.values())
+          .filter(t => t.status !== 'done' && t.status !== 'archived')
+          .map(t => ({ id: t.id, title: t.title, due_date: t.dueDate || '', estimated_minutes: t.estMinutes || 0, priority: t.priority }));
+        data = await aiCall('reprioritize', { tasks });
+      } else if (act === 'ai-predict') {
+        const ev = aiParseEvents(card.querySelector('[data-in="events"]').value);
+        data = await aiCall('predict', { events: ev });
+      }
+      renderOutput(card, data, feature);
+    } catch (err) {
+      out.innerHTML = '<div class="ai-err">' + esc(err.message || String(err)) + '</div>';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldText;
+    }
   });
 }
 

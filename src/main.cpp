@@ -19,6 +19,7 @@
 #include "storage.hpp"
 #include "exporter.hpp"
 #include "backup.hpp"
+#include "ai_gateway.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -830,6 +831,32 @@ static int cmd_serve(Db& db, const Options& opt) {
     HttpServer srv("web");
     Api api(db, "web");
     api.register_routes(srv);
+
+    // ---- AI 智能层网关：/api/ai/* 转发到本地 AI 服务 (ai/app.py，默认 :8777) ----
+    {
+        const char* ai_env = std::getenv("AI_BASE_URL");
+        if (ai_env && ai_env[0] != '\0')
+            AiGateway::instance().configure(ai_env, "sk-no-key");
+        HttpHandler ai_proxy = [](const HttpRequest& req) -> HttpResponse {
+            // /api/ai/X -> AI 服务实际路由（其前缀不统一：/api/*、/health、/v1/*）
+            // 例：/api/ai/decompose -> /api/decompose；/api/ai/health -> /health
+            std::string sub = req.path;
+            const std::string pfx = "/api/ai";
+            if (sub.rfind(pfx, 0) == 0) sub = sub.substr(pfx.size());
+            if (sub != "/health" && sub.rfind("/v1/", 0) != 0)
+                sub = "/api" + sub;   // /decompose -> /api/decompose
+            // 保留原 HTTP 方法（GET 走 AiGateway::get，其余走 post）
+            std::string resp = (req.method == "GET")
+                ? AiGateway::instance().get(sub)
+                : AiGateway::instance().post(sub, req.body);
+            if (resp.empty())
+                return HttpResponse::error(502,
+                    "AI 服务不可用：请确认已启动 ai/app.py 且后端模型已就绪");
+            return HttpResponse::json(200, resp);
+        };
+        srv.on("POST", "/api/ai/*", ai_proxy);
+        srv.on("GET",  "/api/ai/*", ai_proxy);
+    }
     if (!srv.start(opt.port)) {
         std::cerr << "启动失败：端口 " << opt.port << " 被占用或不可用\n";
         return 1;

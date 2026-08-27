@@ -12,6 +12,8 @@ struct AiGateway {
     static AiGateway& instance();
     // 向本地 AI 服务发送 JSON，返回响应体（失败返回空串）
     std::string post(const std::string& path, const std::string& json_body);
+    // 向本地 AI 服务发送 GET，返回响应体（失败返回空串）
+    std::string get(const std::string& path);
     void configure(const std::string& base_url, const std::string& api_key);
 private:
     AiGateway() = default;
