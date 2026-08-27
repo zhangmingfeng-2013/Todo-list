@@ -26,6 +26,8 @@
 需要：cmake、C++17 编译器（macOS 自带 clang / Linux gcc）。
 构建产物：`build/todo`（Web 资源自动复制到 `build/web/`，任意目录均可启动）。
 
+> 基础功能（CLI / Web）到此即可用。**可选的本地 AI 助手**需要额外准备模型权重并启动 AI 服务栈，见下文「AI 助手」章节。`build/` 与模型权重不入库（见 `.gitignore`）。
+
 ### 2. 启动 Web 界面
 
 ```bash
@@ -113,6 +115,46 @@ curl --noproxy '*' -X POST http://127.0.0.1:8931/api/tasks \
   -d '{"title":"写周报","dueDate":"2026-08-28","priority":2}'
 ```
 
+## AI 助手（本地离线，可选）
+
+侧栏「AI 助手」提供 4 个本地智能能力，全部在您本机推理，**不联网、不上传任何数据**：
+
+| 能力 | 说明 |
+|------|------|
+| 任务拆解器 | 输入一个目标，拆成带依赖顺序与预估工时的步骤，可一键添加为子任务 |
+| 上下文智能补全 | 粘贴任意文本，自动抽取其中的待办条目 |
+| 动态优先级推演 | 读取当前任务池，给出建议执行顺序、可延后项与可舍弃项 |
+| 任务预判生成 | 根据近期事件（会议 / 截止日）衍生应提前准备的待办 |
+
+### 架构（三个独立进程）
+
+请求链路：`Web(:8931) ← C++ libcurl 网关 ← AI 服务(:8777) ← 模型服务(:8080)`
+
+- **模型服务** `mlx_lm.server`：加载自训融合模型（`ai/train/fused/`），提供 OpenAI 兼容接口（基于 Apple MLX，原生 macOS）。
+- **AI 服务** `ai/app.py`：4 个特征路由 + 容错 JSON 抽取，零第三方依赖（仅 Python 标准库）。
+- **主服务** `./build/todo serve`：内嵌 libcurl 网关，将 `/api/ai/*` 转发到 AI 服务。
+
+### 启动
+
+```bash
+./ai/start_ai_backend.sh start   # 启动模型服务 + AI 服务
+./build/todo serve               # 启动主服务，浏览器访问 http://127.0.0.1:8931/ ，点侧栏「AI 助手」
+./ai/start_ai_backend.sh stop    # 停止 AI 后端栈
+```
+
+> 脚本用 `nohup` + `disown` 管理进程（macOS 无 `setsid`）；长生命周期服务建议在可托管的环境内运行，避免被 shell 回收。
+
+### 本地准备（模型权重不入库）
+
+仓库**不含**模型权重与构建产物。克隆后若要启用 AI 助手，需本地准备：
+
+1. **Python 环境**：`cd ai/train && python -m venv venv && ./venv/bin/pip install mlx-lm`
+2. **基座模型**：首次运行会经 HuggingFace 镜像自动拉取 `mlx-community/Qwen2.5-1.5B-Instruct-4bit`（建议设 `HF_ENDPOINT=https://hf-mirror.com` 加速），存于 `ai/train/base_model/`。
+3. **自训融合模型**：依次运行 `ai/train/synthesize.py` → `ai/train/train_lora.py`（内部含 `mlx_lm lora` 与 `mlx_lm fuse`），生成 `ai/train/fused/`。脚本与参数见 `ai/train/`。
+4. **构建主服务**：`./build.sh`
+
+> 若未准备模型权重，前端「AI 助手」会提示 `LLM connection failed`——这是预期行为，其余功能不受影响。
+
 ## 架构
 
 ```
@@ -130,9 +172,12 @@ curl --noproxy '*' -X POST http://127.0.0.1:8931/api/tasks \
 │   └── json.hpp            # 自研最小 JSON 库
 ├── web/                    # 前端 SPA（原生 HTML/CSS/JS + 本地化 marked.min.js）
 ├── vendor/                 # SQLite amalgamation 等单文件依赖
+├── ai/                     # 本地 AI 服务与自训工具链（模型权重不入库，见「AI 助手」）
 ├── webdav-sync/            # 零依赖 Python WebDAV 双向同步器（可选）
 └── gui/                    # pywebview 桌面窗口与 .app Bundle 打包（可选）
 ```
+
+> `build/`（编译产物）、`ai/train/base_model/`、`ai/train/fused/`、`ai/train/adapters/`（模型权重）均为生成物，已被 `.gitignore` 排除，不随仓库分发。
 
 依赖策略：SQLite amalgamation 与单文件库随仓库分发，目标是"编译后单个二进制可运行"，除编译工具链外零外部依赖。
 
