@@ -14,7 +14,7 @@
         或 ~/.cpp-todo.conf 的 [ai] 段。
 """
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 from config import load_config
@@ -114,8 +114,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "GET" and path == "/health":
             _reply(self, 200, {
                 "status": "ok",
-                "model": cfg["model"],
+                "model": llm.resolved_model(),
                 "base_url": cfg["base_url"],
+                "configured_model": cfg["model"],
             })
             return
         if self.command == "POST" and path == "/v1/chat/completions":
@@ -144,15 +145,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._dispatch()
 
-    def log_message(self, *args):
-        pass
+    def log_message(self, fmt, *args):
+        print(f"[ai-http] {fmt % args}")
 
 
 def main():
     host = cfg.get("host", "127.0.0.1")
     port = int(cfg.get("port", 8777))
     print(f"[ai-service] http://{host}:{port}  model={cfg['model']}  llm={cfg['base_url']}")
-    HTTPServer((host, port), Handler).serve_forever()
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
 
 
 if __name__ == "__main__":

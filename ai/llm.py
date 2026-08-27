@@ -22,11 +22,12 @@ class LLMClient:
         self.model = model
         self.temperature = float(temperature)
         self._resolved = None  # 懒加载：从 /v1/models 发现后端真实模型名
+        self._discover_error = None
 
     def _discover_model(self):
         """向 /v1/models 查询后端实际模型 id（避免 model 名不匹配导致 404）。"""
+        url = f"{self.base_url}/models"
         try:
-            url = f"{self.base_url}/models"
             req = urllib.request.Request(url, method="GET")
             req.add_header("Authorization", f"Bearer {self.api_key}")
             with _no_proxy_opener.open(req, timeout=10) as resp:
@@ -35,17 +36,25 @@ class LLMClient:
             if models:
                 mid = models[0].get("id")
                 if mid:
-                    # mlx_lm.server 按"目录 basename"校验模型名；截短以保证跨后端通用
-                    #（Ollama 模型名如 deepseek-r1:1.5b 不是路径，basename 退化为原值）
-                    return os.path.basename(mid.rstrip("/"))
-        except Exception:
+                    # mlx_lm.server 把加载路径作为 model id 严格校验，必须原样返回；
+                    # Ollama / vLLM 等返回的模型名本身就不是路径，原样同样可用。
+                    print(f"[llm] discovered model='{mid}' from {url}")
+                    return mid
+            print(f"[llm] warn: /v1/models returned empty list, fallback to '{self.model}'")
             return None
-        return None
+        except Exception as e:
+            self._discover_error = str(e)
+            print(f"[llm] warn: model discovery failed: {e}")
+            return None
 
     def _model(self):
         if self._resolved is None:
             self._resolved = self._discover_model() or self.model
         return self._resolved
+
+    def resolved_model(self):
+        """触发并返回解析后的模型名（供 health 展示）。"""
+        return self._model()
 
     def chat(self, system, user, max_tokens=1024):
         """返回助手消息文本内容（str）。"""
