@@ -3331,97 +3331,44 @@ async function renderAI(content) {
 
   content.appendChild(wrap);
 
-  // 渲染单个输出
+  // 渲染单个输出（只渲染 Markdown 展示；结构化字段保留给「全部添加」按钮使用）
   function renderOutput(card, data, feature) {
     const out = card.querySelector('[data-out]');
     out.innerHTML = '';
     if (!data) return;
     if (data.error) { out.innerHTML = '<div class="ai-err">' + esc(data.error) + '</div>'; return; }
 
+    // 1) Markdown 展示（唯一展示路径）
+    if (typeof data.markdown === 'string' && data.markdown.trim()) {
+      const mdBox = document.createElement('div'); mdBox.className = 'ai-md';
+      try {
+        mdBox.innerHTML = md(data.markdown);
+      } catch (err) {
+        mdBox.innerHTML = '<pre class="ai-json">' + esc(data.markdown) + '</pre>';
+      }
+      out.appendChild(mdBox);
+    }
+
+    // 2) 功能按钮：decompose / extract / predict → 全部添加为任务
     if (feature === 'decompose' && Array.isArray(data.steps)) {
-      const list = document.createElement('div'); list.className = 'ai-list';
-      data.steps.forEach((s, i) => {
-        const dep = (s.depends_on || []).map(d => '#' + (d + 1)).join(' ');
-        const row = document.createElement('div'); row.className = 'ai-item';
-        row.innerHTML =
-          '<span class="ai-num">' + (i + 1) + '</span>' +
-          '<div class="ai-body"><div class="ai-title">' + esc(s.title) + '</div>' +
-          (s.note ? '<div class="ai-note">' + esc(s.note) + '</div>' : '') +
-          '<div class="ai-meta">⏱ ' + (s.estimated_minutes || '?') + ' 分钟' +
-          (dep ? '　🔗 依赖 ' + esc(dep) : '') + '</div></div>';
-        list.appendChild(row);
-      });
-      out.appendChild(list);
       addAllButton(out, data.steps, '已添加 ' + data.steps.length);
       return;
     }
     if (feature === 'extract' && Array.isArray(data.items)) {
-      const list = document.createElement('div'); list.className = 'ai-list';
-      data.items.forEach(it => {
-        const row = document.createElement('div'); row.className = 'ai-item';
-        row.innerHTML = '<span class="ai-num">•</span><div class="ai-body"><div class="ai-title">' + esc(it.title) + '</div>' +
-          (it.note ? '<div class="ai-note">' + esc(it.note) + '</div>' : '') + '</div>';
-        list.appendChild(row);
-      });
-      out.appendChild(list);
       addAllButton(out, data.items, '已添加 ' + data.items.length);
       return;
     }
     if (feature === 'predict' && Array.isArray(data.todos)) {
-      const list = document.createElement('div'); list.className = 'ai-list';
-      data.todos.forEach(it => {
-        const row = document.createElement('div'); row.className = 'ai-item';
-        row.innerHTML = '<span class="ai-num">•</span><div class="ai-body"><div class="ai-title">' + esc(it.title) + '</div>' +
-          (it.note ? '<div class="ai-note">' + esc(it.note) + '</div>' : '') +
-          '<div class="ai-meta">📅 ' + esc(it.due || '无日期') + '　⚑ ' + (it.priority === 2 ? '高' : it.priority === 1 ? '中' : '低') + '</div></div>';
-        list.appendChild(row);
-      });
-      out.appendChild(list);
       addAllButton(out, data.todos, '已添加 ' + data.todos.length);
       return;
     }
-    if (feature === 'reprioritize') {
-      const rp = document.createElement('div'); rp.className = 'ai-rp';
-      if (Array.isArray(data.ordered) && data.ordered.length) {
-        const sec = document.createElement('div'); sec.className = 'ai-rp-section';
-        sec.insertAdjacentHTML('beforeend', '<h4>建议顺序</h4>');
-        data.ordered.forEach((o, i) => {
-          const task = S.taskIndex.get(o.id);
-          const title = task ? task.title : ('任务 #' + o.id);
-          const pri = o.predicted_priority;
-          sec.insertAdjacentHTML('beforeend',
-            '<div class="ai-rp-row"><span class="ai-num">' + (i + 1) + '</span>' +
-            '<span class="ai-title">' + esc(title) + '</span>' +
-            '<span class="ai-meta">⚑ ' + (pri >= 0.8 ? '高' : pri >= 0.4 ? '中' : '低') + '　' + esc(o.reason || '') + '</span></div>');
-        });
-        rp.appendChild(sec);
-      }
-      if (Array.isArray(data.postpone) && data.postpone.length) {
-        const sec = document.createElement('div'); sec.className = 'ai-rp-section';
-        sec.insertAdjacentHTML('beforeend', '<h4>📌 可延后</h4>');
-        data.postpone.forEach(id => {
-          const t = S.taskIndex.get(id);
-          sec.insertAdjacentHTML('beforeend', '<div class="ai-rp-row">📌 ' + esc(t ? t.title : '#' + id) + '</div>');
-        });
-        rp.appendChild(sec);
-      }
-      if (Array.isArray(data.drop) && data.drop.length) {
-        const sec = document.createElement('div'); sec.className = 'ai-rp-section';
-        sec.insertAdjacentHTML('beforeend', '<h4>🗑 可舍弃</h4>');
-        data.drop.forEach(id => {
-          const t = S.taskIndex.get(id);
-          sec.insertAdjacentHTML('beforeend', '<div class="ai-rp-row">🗑 ' + esc(t ? t.title : '#' + id) + '</div>');
-        });
-        rp.appendChild(sec);
-      }
-      if (!rp.childNodes.length) {
-        rp.insertAdjacentHTML('beforeend', '<p class="ai-hint">当前任务池无需调整。</p>');
-      }
-      out.appendChild(rp);
-      return;
+    // reprioritize 不需要添加按钮（展示建议即可）
+    if (feature === 'reprioritize') return;
+
+    // 极度异常回退：既没 Markdown 又不匹配任何 feature —— 才输出原始 JSON
+    if (out.childElementCount === 0) {
+      out.innerHTML = '<pre class="ai-json">' + esc(JSON.stringify(data, null, 2)) + '</pre>';
     }
-    // 回退：原始 JSON
-    out.innerHTML = '<pre class="ai-json">' + esc(JSON.stringify(data, null, 2)) + '</pre>';
   }
 
   function addAllButton(out, items, okMsg) {
@@ -3451,7 +3398,13 @@ async function renderAI(content) {
     const card = btn.closest('.ai-card');
     const out = card.querySelector('[data-out]');
     const act = btn.dataset.act;
-    const feature = act.replace('ai-', '');
+    // 把按钮 data-act 映射成与后端/渲染分支一致的 feature key
+    let feature;
+    if (act === 'ai-go') feature = 'decompose';
+    else if (act === 'ai-extract') feature = 'extract';
+    else if (act === 'ai-reprioritize') feature = 'reprioritize';
+    else if (act === 'ai-predict') feature = 'predict';
+    else feature = act.replace('ai-', '');
     btn.disabled = true;
     const oldText = btn.textContent;
     btn.textContent = '思考中…';

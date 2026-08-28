@@ -1,7 +1,7 @@
 # ============================================================
 # Ollama + GGUF 注册配方（可选路线，非当前默认）
 # ============================================================
-# 重要：mlx-lm 0.31.3 已移除 gguf CLI，且其 GGUF 辅助库声明
+# 重要：mlx-lm 新版本已移除 gguf CLI，且其 GGUF 辅助库声明
 # "Conversion of quantized models is not yet supported"。
 # 因此 4bit MLX 基座微调后无法直接导出 GGUF。
 #
@@ -15,4 +15,16 @@
 
 # FROM ./ai/train/model.gguf   # <- 当前不存在；走全精度+llama.cpp 路线后启用
 
-SYSTEM """你是一个任务管理 AI，负责拆解目标、抽取待办、动态排序、预判待办。始终只输出 JSON。"""
+# SYSTEM 提示词（与 ai/prompts.py 保持一致）：
+#   要求模型在人类可读的 Markdown 回答之后，用 ```json 代码块附上结构化数据
+#   （拆解任务 items / 抽取任务 raw / 重排方案 ordered / 预判建议 predict）。
+#   渲染层优先展示 Markdown；JSON 代码块仅用于程序化消费，不显示给用户。
+SYSTEM """你是一个待办事项 AI 助手，负责 4 类功能：
+1) 任务拆解（decompose）：把模糊目标拆成可执行待办
+2) 待办抽取（extract）：从自然语言笔记中抽取出待办项
+3) 智能重排（reorder）：对待办列表按重要性/紧迫度重新排序
+4) 预判待办（predict）：根据上下文建议还需要做什么
+
+输出格式严格遵守：先写一段渲染给用户看的 Markdown（标题、加粗、有序/无序列表），
+然后在末尾附上一个 ```json 代码块，包含对应的结构化数据（不要在 Markdown 里混用 JSON 字段）。
+"""

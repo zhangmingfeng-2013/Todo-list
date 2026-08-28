@@ -25,7 +25,7 @@ from prompts import (
     reprioritize_prompt,
     predict_prompt,
 )
-from parseutil import extract_json
+from parseutil import extract_json, split_markdown_and_json
 
 cfg = load_config()
 llm = LLMClient(
@@ -51,16 +51,52 @@ def _body_json(handler):
         return {}
 
 
+def _safe_parse(raw_text, expected_keys):
+    """统一解析：先 split_markdown_and_json，再 extract_json 兜底。
+
+    返回 (md_text, parsed_dict_or_None)。
+    - md_text：去除围栏后的展示文本（可能为空字符串）
+    - parsed_dict_or_None：包含期望 key 的 dict，或 None
+    """
+    md_text, parsed = split_markdown_and_json(raw_text)
+    if isinstance(parsed, dict) and any(k in parsed for k in expected_keys):
+        return md_text, parsed
+    # 兜底：尝试 extract_json
+    parsed2 = extract_json(raw_text)
+    if isinstance(parsed2, dict) and any(k in parsed2 for k in expected_keys):
+        return md_text, parsed2
+    return md_text, None
+
+
+def _build_success(feature, parsed, md_text_from_model, goal=None):
+    """包装响应：保留原有结构化字段（steps/items/todos/ordered 等），追加 markdown 字段。"""
+    md = md_text_from_model if md_text_from_model and md_text_from_model.strip() else None
+    if feature == "decompose":
+        steps = parsed.get("steps", []) if isinstance(parsed, dict) else []
+        return 200, {"goal": goal, "steps": steps, "markdown": md or ""}
+    if feature == "extract":
+        items = parsed.get("items", []) if isinstance(parsed, dict) else []
+        return 200, {"items": items, "markdown": md or ""}
+    if feature == "predict":
+        todos = parsed.get("todos", []) if isinstance(parsed, dict) else []
+        return 200, {"todos": todos, "markdown": md or ""}
+    # reprioritize
+    base = parsed if isinstance(parsed, dict) else {}
+    merged = {**base, "markdown": md or ""}
+    return 200, merged
+
+
 def handle_decompose(data):
     goal = (data.get("goal") or "").strip()
     if not goal:
         return 400, {"error": "missing 'goal'"}
     system, user = decompose_prompt(goal, data.get("context"))
     text = llm.chat(system, user)
-    parsed = extract_json(text)
-    if not parsed or "steps" not in parsed:
-        return 502, {"error": "model returned no parseable steps", "raw": text}
-    return 200, {"goal": goal, "steps": parsed["steps"]}
+    md_text, parsed = _safe_parse(text, ["steps"])
+    # 即使解析失败，只要有 markdown 就返回 200（前端可展示 AI 文本）
+    if parsed is None:
+        return 200, {"goal": goal, "steps": [], "markdown": md_text or text, "warning": "structured_data_unavailable"}
+    return _build_success("decompose", parsed, md_text, goal=goal)
 
 
 def handle_extract(data):
@@ -69,10 +105,10 @@ def handle_extract(data):
         return 400, {"error": "missing 'text'"}
     system, user = extract_prompt(text)
     out = llm.chat(system, user)
-    parsed = extract_json(out)
-    if not parsed or "items" not in parsed:
-        return 502, {"error": "model returned no parseable items", "raw": out}
-    return 200, {"items": parsed["items"]}
+    md_text, parsed = _safe_parse(out, ["items"])
+    if parsed is None:
+        return 200, {"items": [], "markdown": md_text or out, "warning": "structured_data_unavailable"}
+    return _build_success("extract", parsed, md_text)
 
 
 def handle_reprioritize(data):
@@ -81,10 +117,10 @@ def handle_reprioritize(data):
         return 400, {"error": "missing 'tasks' list"}
     system, user = reprioritize_prompt(tasks)
     out = llm.chat(system, user)
-    parsed = extract_json(out)
-    if not parsed:
-        return 502, {"error": "model returned no parseable plan", "raw": out}
-    return 200, parsed
+    md_text, parsed = _safe_parse(out, ["ordered", "postpone", "drop"])
+    if parsed is None:
+        return 200, {"ordered": [], "postpone": [], "drop": [], "markdown": md_text or out, "warning": "structured_data_unavailable"}
+    return _build_success("reprioritize", parsed, md_text)
 
 
 def handle_predict(data):
@@ -93,10 +129,10 @@ def handle_predict(data):
         return 400, {"error": "missing 'events' list"}
     system, user = predict_prompt(events)
     out = llm.chat(system, user)
-    parsed = extract_json(out)
-    if not parsed or "todos" not in parsed:
-        return 502, {"error": "model returned no parseable todos", "raw": out}
-    return 200, {"todos": parsed["todos"]}
+    md_text, parsed = _safe_parse(out, ["todos"])
+    if parsed is None:
+        return 200, {"todos": [], "markdown": md_text or out, "warning": "structured_data_unavailable"}
+    return _build_success("predict", parsed, md_text)
 
 
 ROUTES = {

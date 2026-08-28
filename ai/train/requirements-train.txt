@@ -1,3 +1,9 @@
 # 训练阶段依赖（仅训练机，不在 cpp-todo 运行时内）
-mlx-lm
-huggingface_hub
+# Apple MLX 原生路径（macOS / Apple Silicon 推荐）
+# 说明：
+#   mlx-lm     - 提供 `mlx_lm lora`（LoRA 训练）、`mlx_lm fuse`（权重融合）、`mlx_lm server`（推理服务）
+#   huggingface_hub - 自动从 mlx-community 下载 4bit 量化基座模型
+#   mlx        - Apple Silicon 原生计算框架（通常随 mlx-lm 一起装，显式声明便于排查）
+mlx>=0.18.0
+mlx-lm>=0.20.0,<1.0
+huggingface_hub>=0.23.0
