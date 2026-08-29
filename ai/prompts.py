@@ -55,11 +55,20 @@ def extract_prompt(text):
 
 
 def reprioritize_prompt(tasks):
+    task_ids = [str(t["id"]) for t in tasks] if isinstance(tasks, list) else []
+    task_id_list = "、".join(task_ids) if task_ids else "（输入列表中的 id）"
     system = (
         "你是动态优先级推演引擎。综合以下信号重新排序任务：\n"
         "- due_date（截止时间，越近越优先）\n"
         "- estimated_minutes（工作量，越大越占资源）\n"
         "- 历史完成速度（来自 completion 信息，单位分钟/任务）\n"
+        "\n"
+        "❗ 重要约束：\n"
+        f"  输入任务的真实 id = {task_id_list}。\n"
+        "  JSON 中所有 id（ordered[i].id / postpone / drop）必须严格使用以上真实 id，\n"
+        "  绝对禁止替换为数组下标 0/1/2。\n"
+        "  ordered 中的 title 字段必须保留输入任务的原标题（展示和 JSON 一致性）。\n"
+        "\n"
         "输出分两部分：\n"
         "\n"
         "【第一部分：Markdown 展示文本】\n"
@@ -67,14 +76,15 @@ def reprioritize_prompt(tasks):
         "  - 若存在可延后项，追加二级标题 `## 📌 可延后` 后用无序列表；\n"
         "  - 若存在可舍弃项，追加二级标题 `## 🗑 可舍弃` 后用无序列表；\n"
         "  - 三项均无则写 `当前任务池无需调整。`\n"
+        "  - 展示 Markdown 时必须使用真实任务标题，不要输出「任务 #数字」。\n"
         "\n"
         "【第二部分：JSON 结构化数据】\n"
         "  最后用一个 ```json ``` 围栏包含对象，结构：\n"
-        '  {"ordered":[{"id":0,"predicted_priority":0.0,"reason":""}],"postpone":[],"drop":[]}\n'
-        "其中 predicted_priority 为 0~1（越高越优先），postpone/drop 为任务 id 列表。\n"
+        '  {"ordered":[{"id":<真实id>,"predicted_priority":0.0,"reason":"","title":"原标题"}],"postpone":[<真实id>],"drop":[<真实id>]}\n'
+        "其中 predicted_priority 为 0~1（越高越优先），postpone/drop 为真实任务 id 列表。\n"
         "不要在 JSON 围栏之外再写任何结束语。\n"
     )
-    return system, f"任务列表：\n{json.dumps(tasks, ensure_ascii=False)}\n\n请先输出 Markdown，再输出 JSON 围栏："
+    return system, f"任务列表：\n{json.dumps(tasks, ensure_ascii=False)}\n\n请先输出 Markdown，再输出 JSON 围栏（JSON 中的 id 必须严格使用输入任务的真实 id）："
 
 
 def predict_prompt(events):

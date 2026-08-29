@@ -3293,6 +3293,13 @@ function aiParseEvents(text) {
 }
 
 async function renderAI(content) {
+  // 确保任务索引已加载（页面初始跳 AI 视图时 taskIndex 可能为空）
+  if (S.taskIndex.size === 0) {
+    try {
+      const treeData = await apiGet('/api/tree');
+      buildTaskIndex(treeData.tree || [], S.taskIndex);
+    } catch (_) { /* 忽略 */ }
+  }
   const head = viewHead('AI 智能助手', '本地 1B 模型 · 全离线 · 隐私闭环');
   content.appendChild(head);
 
@@ -3420,9 +3427,19 @@ async function renderAI(content) {
         if (!text) throw new Error('请粘贴文本');
         data = await aiCall('extract', { text });
       } else if (act === 'ai-reprioritize') {
+        // 防御：如果 taskIndex 还没建（直接跳 AI 视图没走预加载、或老缓存 app.js），临点再拉一次
+        if (S.taskIndex.size === 0) {
+          try {
+            const treeData = await apiGet('/api/tree');
+            buildTaskIndex(treeData.tree || [], S.taskIndex);
+          } catch (_) { /* 忽略 */ }
+        }
         const tasks = Array.from(S.taskIndex.values())
           .filter(t => t.status !== 'done' && t.status !== 'archived')
           .map(t => ({ id: t.id, title: t.title, due_date: t.dueDate || '', estimated_minutes: t.estMinutes || 0, priority: t.priority }));
+        if (!tasks.length) {
+          throw new Error('当前没有可重排的未完成任务');
+        }
         data = await aiCall('reprioritize', { tasks });
       } else if (act === 'ai-predict') {
         const ev = aiParseEvents(card.querySelector('[data-in="events"]').value);

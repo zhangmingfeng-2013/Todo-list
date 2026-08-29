@@ -334,13 +334,35 @@ def build_fallback_markdown(feature, parsed, fallback_title="AI 输出"):
     if feature == "reprioritize":
         lines = []
         ordered = parsed.get("ordered") or []
+        # 可用标题映射：优先 _titles（app.py 注入），其次 o.title
+        titles = parsed.get("_titles") or {}
+
+        def _title_of(tid):
+            if tid is None:
+                return "任务"
+            if str(tid) in titles:
+                return titles[str(tid)]
+            return f"任务 #{tid}"
+
         if ordered:
             lines.append("## 建议顺序")
             for i, o in enumerate(ordered):
+                if not isinstance(o, dict):
+                    continue
                 pri = o.get("predicted_priority")
                 pri_cn = "高" if (pri is not None and pri >= 0.8) else "中" if (pri is not None and pri >= 0.4) else "低"
-                title = f"任务 #{o.get('id')}" if "id" in o else "任务"
+                tid = o.get("id")
+                # ordered 对象自身 title 优先于 _titles 映射
+                title = o.get("title") if isinstance(o.get("title"), str) and o.get("title").strip() else _title_of(tid)
                 reason = o.get("reason") or ""
+                # 根据 pri 粗算简单默认理由（仅当模型完全没给时）
+                if not reason:
+                    if pri is not None and pri >= 0.8:
+                        reason = "模型判定优先级较高（截止近/工作量大）"
+                    elif pri is not None and pri >= 0.4:
+                        reason = "模型判定优先级中等"
+                    else:
+                        reason = "模型判定可延后处理"
                 line = f"{i+1}. **{title}** ⚑{pri_cn}"
                 if reason:
                     line += f" —— {reason}"
@@ -350,13 +372,13 @@ def build_fallback_markdown(feature, parsed, fallback_title="AI 输出"):
             lines.append("")
             lines.append("## 📌 可延后")
             for tid in postpone:
-                lines.append(f"- 任务 #{tid}")
+                lines.append(f"- {_title_of(tid)}")
         drop = parsed.get("drop") or []
         if drop:
             lines.append("")
             lines.append("## 🗑 可舍弃")
             for tid in drop:
-                lines.append(f"- 任务 #{tid}")
+                lines.append(f"- {_title_of(tid)}")
         if not lines:
             return "## 优先级推演\n\n_当前任务池无需调整。_"
         return "\n".join(lines)

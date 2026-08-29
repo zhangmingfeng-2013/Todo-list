@@ -4,6 +4,8 @@
 
 用 C++17 + 内嵌 SQLite 实现的完整待办工具：**单个可执行文件**、CLI 与 Web 双前端、可选桌面窗口。服务仅监听 `127.0.0.1`，所有数据存储在本机，无云端、无遥测。
 
+> **跨平台支持**：C++ 主服务与 Python AI 服务在 macOS / Linux 原生可用；Windows 推荐 WSL2 跑 Linux 二进制（原生编译需重写 `src/http.cpp` 的 POSIX socket 层为 Winsock2）。AI 推理后端按平台切换：macOS 默认 MLX，Linux/Windows 用 Ollama 或 llama.cpp，详见「AI 助手」章节。
+
 ## 功能总览
 
 | 领域     | 能力                                                                              |
@@ -14,6 +16,7 @@
 | Web 视图 | 今日面板、项目树、标签、日历（月/周）、时间块日视图、看板、甘特图、统计仪表盘、热力图、回收站（30 天）                           |
 | 效率工具   | 自然语言快速录入（`明天下午3点 写周报 #工作 !高`）、命令面板（⌘K / Ctrl+K）、任务模板、批量操作、撤销（最近 200 步）、番茄钟、深色主题 |
 | 数据管理   | SQLite WAL 存储、每日自动备份、多格式导入导出、存储位置迁移（U 盘）、WebDAV 同步                              |
+| AI 助手   | 本地离线推理（不联网）：任务拆解器、上下文智能补全（文本抽取待办）、动态优先级推演、任务预判生成；一键入库，详见「AI 助手」章节   |
 
 ## 快速开始
 
@@ -23,7 +26,14 @@
 ./build.sh
 ```
 
-需要：cmake、C++17 编译器（macOS 自带 clang / Linux gcc）。
+需要：cmake、C++17 编译器、libcurl 开发头文件。
+
+| 平台    | 依赖安装                                                     |
+| ------- | ------------------------------------------------------------ |
+| macOS   | 自带 clang + libcurl，无需额外安装                           |
+| Linux   | `sudo apt install cmake build-essential libcurl4-openssl-dev`（Debian/Ubuntu）；其他发行版用对应包管理器 |
+| Windows | 推荐 WSL2（`wsl --install` 后在 Ubuntu 内按 Linux 步骤操作） |
+
 构建产物：`build/todo`（Web 资源自动复制到 `build/web/`，任意目录均可启动）。
 
 > 基础功能（CLI / Web）到此即可用。**可选的本地 AI 助手**需要额外准备模型权重并启动 AI 服务栈，见下文「AI 助手」章节。`build/` 与模型权重不入库（见 `.gitignore`）。
@@ -130,28 +140,54 @@ curl --noproxy '*' -X POST http://127.0.0.1:8931/api/tasks \
 
 请求链路：`Web(:8931) ← C++ libcurl 网关 ← AI 服务(:8777) ← 模型服务(:8080)`
 
-- **模型服务** `mlx_lm.server`：加载自训融合模型（`ai/train/fused/`），提供 OpenAI 兼容接口（基于 Apple MLX，原生 macOS）。
-- **AI 服务** `ai/app.py`：4 个特征路由 + 容错 JSON 抽取，零第三方依赖（仅 Python 标准库）。
+- **模型服务**：OpenAI 兼容接口。按平台选择运行时（见下表），默认 macOS 走 MLX，Linux/Windows 走 Ollama 或 llama.cpp。
+- **AI 服务** `ai/app.py`：4 个特征路由 + 容错 JSON 抽取，零第三方依赖（仅 Python 标准库），后端无关。
 - **主服务** `./build/todo serve`：内嵌 libcurl 网关，将 `/api/ai/*` 转发到 AI 服务。
 
 ### 启动
 
 ```bash
-./ai/start_ai_backend.sh start   # 启动模型服务 + AI 服务
+./ai/start_ai_backend.sh start   # 启动模型服务 + AI 服务（默认按平台选运行时）
 ./build/todo serve               # 启动主服务，浏览器访问 http://127.0.0.1:8931/ ，点侧栏「AI 助手」
 ./ai/start_ai_backend.sh stop    # 停止 AI 后端栈
+./ai/start_ai_backend.sh status  # 查看运行状态与端口监听
 ```
+
+通过 `AI_RUNTIME` 环境变量切换模型推理后端：
+
+| 运行时        | 平台支持              | 依赖                                                            | 环境变量示例                                                                        |
+|------------|-------------------|---------------------------------------------------------------|--------------------------------------------------------------------------------|
+| `mlx`      | macOS Apple Silicon | 项目自训融合权重 `ai/train/fused/` + `ai/train/venv`（仅 macOS）          | 默认；无需设置                                                                        |
+| `ollama`   | macOS / Linux / Windows | 本机 Ollama 服务，模型名由 `AI_MODEL` 指定（默认 `qwen2.5:3b`，省内存可改 `1.5b`）   | `AI_RUNTIME=ollama`                                                            |
+| `llamacpp` | macOS / Linux / Windows | `llama-server` 可执行文件 + GGUF 权重路径（`AI_GGUF` 必填）                | `AI_RUNTIME=llamacpp AI_GGUF=/path/to/model.gguf AI_LLAMACPP_BIN=llama-server` |
 
 > 脚本用 `nohup` + `disown` 管理进程（macOS 无 `setsid`）；长生命周期服务建议在可托管的环境内运行，避免被 shell 回收。
 
 ### 本地准备（模型权重不入库）
 
-仓库**不含**模型权重与构建产物。克隆后若要启用 AI 助手，需本地准备：
+仓库**不含**模型权重与构建产物。克隆后若要启用 AI 助手，按平台选择路径之一：
+
+#### 方式 A：macOS + MLX（自训融合模型，质量最佳）
 
 1. **Python 环境**：`cd ai/train && python -m venv venv && ./venv/bin/pip install mlx-lm`
 2. **基座模型**：首次运行会经 HuggingFace 镜像自动拉取 `mlx-community/Qwen2.5-1.5B-Instruct-4bit`（建议设 `HF_ENDPOINT=https://hf-mirror.com` 加速），存于 `ai/train/base_model/`。
 3. **自训融合模型**：依次运行 `ai/train/synthesize.py` → `ai/train/train_lora.py`（内部含 `mlx_lm lora` 与 `mlx_lm fuse`），生成 `ai/train/fused/`。脚本与参数见 `ai/train/`。
 4. **构建主服务**：`./build.sh`
+
+#### 方式 B：跨平台 + Ollama（Linux / Windows / macOS 通用，最简）
+
+1. **安装 Ollama**：
+   - Linux：`curl -fsSL https://ollama.com/install.sh | sh`
+   - Windows / macOS：从 https://ollama.com 下载安装包
+2. **拉取模型**（首次约 1.9 GB）：`ollama pull qwen2.5:3b`（或 `1.5b` 省内存）
+3. **构建主服务**：`./build.sh`（Linux/WSL2 内）
+4. **启动**：`AI_RUNTIME=ollama ./ai/start_ai_backend.sh start`（脚本自动检测缺失模型并触发 pull）
+
+#### 方式 C：跨平台 + llama.cpp（GPU 加速场景）
+
+1. **构建 llama.cpp**（提供 `llama-server`）：见 https://github.com/ggergan/llama.cpp
+2. **下载 GGUF 权重**：从 HuggingFace 下载 Qwen2.5 系列 GGUF 量化文件
+3. **启动**：`AI_RUNTIME=llamacpp AI_GGUF=/path/to/qwen.gguf ./ai/start_ai_backend.sh start`
 
 > 若未准备模型权重，前端「AI 助手」会提示 `LLM connection failed`——这是预期行为，其余功能不受影响。
 
@@ -186,6 +222,9 @@ curl --noproxy '*' -X POST http://127.0.0.1:8931/api/tasks \
 - 农历转换覆盖 1900–2100，超出范围无法转换。
 - 重复任务"跳过节假日"依赖 `holidays` 表的准确性（可用 `holiday auto` 生成）。
 - WebDAV 同步为文件级整库快照，双机同时写入建议使用保留双方的冲突策略（详见 `webdav-sync/README.md`）。
+- 桌面 GUI 仅 macOS（依赖 WKWebView）；Linux/Windows 用浏览器访问 Web 界面。
+- Windows 原生编译未支持：`src/http.cpp` 使用 POSIX socket API（`socket/bind/listen/poll/MSG_NOSIGNAL`），需重写为 Winsock2 或换 cpp-httplib；推荐走 WSL2 跑 Linux 二进制，零源码改动。
+- AI 自训融合权重（`ai/train/fused/`）为 MLX 格式，仅在 macOS 可用；Linux/Windows 需改用 Ollama（`AI_RUNTIME=ollama`）或 llama.cpp（`AI_RUNTIME=llamacpp`）加载等价模型，权重不可跨格式复用。
 
 ## 贡献与许可
 

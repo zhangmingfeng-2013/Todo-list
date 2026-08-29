@@ -44,11 +44,22 @@ if(APPLE)
     )
   endif()
   target_link_libraries(todo PRIVATE pthread)
+elseif(WIN32)
+  # Windows 原生编译需注意：src/http.cpp 使用 POSIX socket API（socket/bind/listen/poll/MSG_NOSIGNAL），
+  # 在 MSVC/MinGW 下需要替换为 Winsock2（WSAStartup/closesocket/ioctlsocket，无 MSG_NOSIGNAL）。
+  # 推荐方案：Windows 用户使用 WSL2 跑 Linux 二进制（与 macOS 行为一致，零源码改动）。
+  #   - MSVC: 线程走 <windows.h>，无需 pthread/dl
+  #   - MinGW/MSYS2: 自带 pthread，dl 不需要
+  # libcurl 通过 vcpkg/conan 提供，find_package(CURL REQUIRED) 已在上方处理
+  if(MINGW)
+    target_link_libraries(todo PRIVATE pthread)
+  endif()
 else()
+  # Linux/Unix/BSD
   target_link_libraries(todo PRIVATE pthread dl)
 endif()
 
-# AI 网关依赖 libcurl
+# AI 网关依赖 libcurl（macOS/Linux 走系统，Windows 通过 vcpkg/conan 提供）
 target_link_libraries(todo PRIVATE CURL::libcurl)
 
 # Web 资源拷贝到构建目录，方便从任意 cwd 启动
