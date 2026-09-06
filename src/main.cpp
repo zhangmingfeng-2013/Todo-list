@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 #include <iostream>
@@ -709,8 +710,22 @@ static int cmd_backup(Db& db, const std::vector<std::string>& args) {
     return 1;
 }
 
-// ---- 系统通知（macOS） ----
-static void send_notification(const std::string& title, const std::string& msg) {
+// ---- 跨平台原生桌面通知 ----
+// macOS: AppleScript display notification（可选提示音）
+// Linux: libnotify 的 notify-send
+// Windows: WinRT Toast（Windows.UI.Notifications），通过临时 .ps1 调用，避免引号地狱
+void desktop_notify(const std::string& title, const std::string& msg, bool sound) {
+    // 统一清理：去掉可能破坏脚本/语义的控制字符与换行
+    auto clean = [](std::string s) {
+        std::string r;
+        for (char c : s) {
+            if (c == '\n' || c == '\r' || c == '\t') r += ' ';
+            else r += c;
+        }
+        return r;
+    };
+    std::string T = clean(title), M = clean(msg);
+
 #ifdef __APPLE__
     // AppleScript 字符串内转义双引号与反斜杠
     auto esc = [](const std::string& s) {
@@ -721,45 +736,116 @@ static void send_notification(const std::string& title, const std::string& msg) 
         }
         return r;
     };
-    std::string cmd = "osascript -e 'display notification \"" + esc(msg) +
-                      "\" with title \"" + esc(title) + "\"' >/dev/null 2>&1 &";
+    std::string soundArg = sound ? " sound name \"Glass\"" : "";
+    std::string cmd = "osascript -e 'display notification \"" + esc(M) +
+                      "\" with title \"" + esc(T) + "\"" + soundArg + "' >/dev/null 2>&1 &";
     std::system(cmd.c_str());
+
+#elif defined(_WIN32)
+    // 写临时 ps1（PowerShell 单引号字符串仅需把 ' 转义为 ''）
+    auto pesc = [](const std::string& s) {
+        std::string r;
+        for (char c : s) { if (c == '\'') r += '\''; r += c; }
+        return r;
+    };
+    char tmpdir[MAX_PATH] = {0};
+    DWORD n = GetTempPathA(MAX_PATH, tmpdir);
+    std::string dir = (n > 0 && n < MAX_PATH) ? std::string(tmpdir) : "";
+    if (!dir.empty() && dir.back() != '\\') dir += '\\';
+    std::string ps1 = dir + "cpp_todo_toast_" + std::to_string(std::time(nullptr)) + ".ps1";
+    {
+        std::ofstream f(ps1);
+        if (!f) return;
+        f << "$ErrorActionPreference='Stop'\n";
+        f << "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null\n";
+        f << "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null\n";
+        f << "$tn = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('cpp-todo')\n";
+        f << "$tmpl = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)\n";
+        f << "$lines = $tmpl.GetElementsByTagName('text')\n";
+        f << "$lines.Item(0).AppendChild($tmpl.CreateTextNode('" << pesc(T) << "')) | Out-Null\n";
+        f << "$lines.Item(1).AppendChild($tmpl.CreateTextNode('" << pesc(M) << "')) | Out-Null\n";
+        f << "$toast = [Windows.UI.Notifications.ToastNotification]::new($tmpl)\n";
+        f << "$tn.Show($toast)\n";
+    }
+    std::string cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File \"" + ps1 + "\" >NUL 2>&1";
+    std::system(cmd.c_str());
+    std::remove(ps1.c_str());
+
 #else
-    (void)title; (void)msg;
+    // Linux / Unix：libnotify 的 notify-send
+    auto esc = [](const std::string& s) {
+        std::string r;
+        for (char c : s) {
+            if (c == '"' || c == '\\' || c == '$' || c == '`') r += '\\';
+            r += c;
+        }
+        return r;
+    };
+    std::string cmd = "notify-send -a cpp-todo -i appointment-soon \"" + esc(T) +
+                      "\" \"" + esc(M) + "\" >/dev/null 2>&1 &";
+    std::system(cmd.c_str());
 #endif
 }
 
 // 提醒轮询线程：每 20 秒检查当日到期任务的 remind_time
+// 将 "YYYY-MM-DD" + "HH:MM" 解析为本地 time_t（失败返回 -1）
+static std::time_t parse_local_dt(const std::string& date, const std::string& hhmm) {
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0;
+    if (std::sscanf(date.c_str(), "%d-%d-%d", &y, &mo, &d) != 3) return -1;
+    if (std::sscanf(hhmm.c_str(), "%d:%d", &h, &mi) != 2) { h = 0; mi = 0; }
+    std::tm t{};
+    t.tm_year = y - 1900; t.tm_mon = mo - 1; t.tm_mday = d;
+    t.tm_hour = h; t.tm_min = mi; t.tm_sec = 0;
+    t.tm_isdst = -1;
+    return std::mktime(&t);
+}
+// 格式化本地 time_t 为 "YYYY-MM-DD HH:MM"（字典序即时间序，便于比较）
+static std::string fmt_local_dt(std::time_t t) {
+    std::tm tm{};
+    localtime_r(&t, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", &tm);
+    return std::string(buf);
+}
+
+// 提醒轮询线程：每 30s 检查到期任务，按「due_date+due_time-remind_minutes」提前触发
+// 原生桌面通知；reminder_fired_at 持久化去重，避免重启重复轰炸。
 static void reminder_thread(Db* pdb, std::atomic<bool>* running) {
-    std::set<std::string> notified;   // key: 日期|id|时间
-    // 记录启动时刻 HH:MM，只通知启动之后到期的提醒（避免重启时轰炸历史提醒）
-    std::time_t st = std::time(nullptr);
-    std::tm stm{};
-    localtime_r(&st, &stm);
-    char start_hhmm[8];
-    std::snprintf(start_hhmm, sizeof start_hhmm, "%02d:%02d", stm.tm_hour, stm.tm_min);
     while (running->load()) {
         try {
-            std::time_t now = std::time(nullptr);
-            std::tm tmv{};
-            localtime_r(&now, &tmv);
-            char hhmm[8];
-            std::snprintf(hhmm, sizeof hhmm, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
-            std::string today = lunar::today_iso();
-            for (auto& r : pdb->query(
-                     "SELECT id,title,remind_time FROM tasks WHERE deleted_at IS NULL "
-                     "AND has_reminder=1 AND remind_time IS NOT NULL "
-                     "AND remind_time<='" + std::string(hhmm) + "' "
-                     "AND remind_time>='" + std::string(start_hhmm) + "' "
-                     "AND (due_date='" + today + "' OR start_date='" + today + "')")) {
-                std::string key = today + "|" + r.get("id") + "|" + r.get("remind_time");
-                if (notified.count(key)) continue;
-                notified.insert(key);
-                send_notification("todo 提醒",
-                                  r.get("title") + " ⏰ " + r.get("remind_time"));
+            // 全局总开关
+            auto en = pdb->query_one("SELECT value FROM settings WHERE key='reminders_enabled'");
+            bool enabled = !en || en->get_int("value", 1) != 0;
+            auto snd = pdb->query_one("SELECT value FROM settings WHERE key='remind_sound'");
+            bool sound = !snd || snd->get_int("value", 1) != 0;
+            if (enabled) {
+                std::string today = lunar::today_iso();
+                for (auto& r : pdb->query(
+                         "SELECT id,title,due_date,due_time,remind_time,remind_minutes,"
+                         "reminder_fired_at FROM tasks WHERE deleted_at IS NULL "
+                         "AND status!='done' AND has_reminder=1 AND due_date IS NOT NULL "
+                         "AND due_date >= '" + today + "'")) {
+                    std::string anchor_time = r.get("due_time");
+                    if (anchor_time.empty()) anchor_time = r.get("remind_time");
+                    if (anchor_time.empty()) anchor_time = "09:00";
+                    long long adv = r.get_int("remind_minutes", 0);
+                    std::time_t fire = parse_local_dt(r.get("due_date"), anchor_time);
+                    if (fire < 0) continue;
+                    if (adv > 0) fire -= adv * 60;
+                    std::string fire_str = fmt_local_dt(fire);
+                    std::string now_str = fmt_local_dt(std::time(nullptr));
+                    if (now_str >= fire_str && r.get("reminder_fired_at") != fire_str) {
+                        std::string when = r.get("due_date") + " " + anchor_time;
+                        std::string detail = (adv > 0 ? ("提前 " + std::to_string(adv) + " 分钟 · ") : "")
+                                             + when;
+                        desktop_notify("cpp-todo 提醒", r.get("title") + "\n⏰ " + detail, sound);
+                        pdb->exec("UPDATE tasks SET reminder_fired_at='" + fire_str +
+                                  "' WHERE id=" + r.get("id"));
+                    }
+                }
             }
         } catch (...) {}
-        for (int i = 0; i < 20 && running->load(); ++i)
+        for (int i = 0; i < 30 && running->load(); ++i)
             std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }

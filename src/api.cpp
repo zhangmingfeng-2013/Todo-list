@@ -91,6 +91,9 @@ Json task_basic_json(Db& db, const Db::Row& r) {
     j["lunarRemind"] = r.get_int("lunar_remind") != 0;
     j["lunarDate"] = r.get("lunar_date");
     j["lunarText"] = lunar_text(r.get("lunar_date"));
+    j["dueTime"] = r.get("due_time");
+    j["remindMinutes"] = r.get_int("remind_minutes");
+    j["reminderFiredAt"] = r.get("reminder_fired_at");
     j["projectId"] = r.get_int("project_id");
     j["parentId"] = r.get_int("parent_id");
     j["sortOrder"] = r.get_int("sort_order");
@@ -235,6 +238,11 @@ Json apply_task_body(Db& db, const Json& body, long long id, bool& ok, std::stri
         }
         if (body.has("hasReminder")) upd("has_reminder", body["hasReminder"]);
         if (body.has("lunarRemind")) upd("lunar_remind", body["lunarRemind"]);
+        if (body.has("dueTime")) {
+            std::string v = body["dueTime"].as_string_or("");
+            upd("due_time", v.empty() ? Json(nullptr) : Json(v));
+        }
+        if (body.has("remindMinutes")) upd("remind_minutes", body["remindMinutes"]);
         if (body.has("lunarDate")) {
             std::string v = body["lunarDate"].as_string_or("");
             upd("lunar_date", v.empty() ? Json(nullptr) : Json(v));
@@ -281,6 +289,8 @@ Json apply_task_body(Db& db, const Json& body, long long id, bool& ok, std::stri
         int has_rem = body["hasReminder"].as_bool_or(!rtime.empty()) ? 1 : 0;
         int lunar_rem = body["lunarRemind"].as_bool_or(false) ? 1 : 0;
         std::string lunar_date = body["lunarDate"].as_string_or("");
+        std::string dtime = body["dueTime"].as_string_or("");
+        long long adv = body["remindMinutes"].as_int_or(0);
         long long pid = body["projectId"].as_int_or(0);
         long long parent = body["parentId"].as_int_or(0);
         std::string status = body["status"].as_string_or("todo");
@@ -291,14 +301,17 @@ Json apply_task_body(Db& db, const Json& body, long long id, bool& ok, std::stri
             repeat_rule = body["repeatRule"].dump();
         }
         std::string sql = "INSERT INTO tasks(title,notes,priority,start_date,due_date,"
-                          "remind_time,has_reminder,lunar_remind,lunar_date,project_id,"
-                          "parent_id,status,mood,est_minutes,repeat_rule) VALUES(" +
+                          "remind_time,has_reminder,lunar_remind,lunar_date,due_time,"
+                          "remind_minutes,project_id,parent_id,status,mood,est_minutes,"
+                          "repeat_rule) VALUES(" +
                           qstr(title) + "," + qstr(notes) + "," + std::to_string(prio) + "," +
                           (start.empty() ? "NULL" : qstr(start)) + "," +
                           (due.empty() ? "NULL" : qstr(due)) + "," +
                           (rtime.empty() ? "NULL" : qstr(rtime)) + "," +
                           std::to_string(has_rem) + "," + std::to_string(lunar_rem) + "," +
                           (lunar_date.empty() ? "NULL" : qstr(lunar_date)) + "," +
+                          (dtime.empty() ? "NULL" : qstr(dtime)) + "," +
+                          std::to_string(adv) + "," +
                           (pid ? std::to_string(pid) : "NULL") + "," +
                           (parent ? std::to_string(parent) : "NULL") + "," +
                           qstr(status) + "," + qstr(mood) + "," +
@@ -353,6 +366,8 @@ Json task_snapshot_json(Db& db, long long id) {
     j["has_reminder"] = row->get_int("has_reminder");
     j["lunar_remind"] = row->get_int("lunar_remind");
     j["lunar_date"] = row->get("lunar_date");
+    j["due_time"] = row->get("due_time");
+    j["remind_minutes"] = row->get_int("remind_minutes");
     j["project_id"] = row->get_int("project_id");
     j["parent_id"] = row->get_int("parent_id");
     j["sort_order"] = row->get_int("sort_order");
@@ -861,6 +876,10 @@ void Api::register_routes(HttpServer& srv) {
     srv.on("GET", "/api/webdav-config", [this](const HttpRequest& r) { return handle_webdav_config(r); });
     srv.on("PUT", "/api/webdav-config", [this](const HttpRequest& r) { return handle_webdav_config(r); });
     srv.on("POST", "/api/webdav-sync", [this](const HttpRequest& r) { return handle_webdav_sync(r); });
+    // ---- 桌面提醒通知 ----
+    srv.on("GET", "/api/reminders/settings", [this](const HttpRequest& r) { return handle_reminders_settings(r); });
+    srv.on("PUT", "/api/reminders/settings", [this](const HttpRequest& r) { return handle_reminders_settings(r); });
+    srv.on("POST", "/api/reminders/test", [this](const HttpRequest& r) { return handle_reminder_test(r); });
 }
 
 // 从 /api/tasks/123 这类路径中取 id（由 handler 传 0 占位后解析）
@@ -889,6 +908,51 @@ static std::string path_action(const HttpRequest& req) {
     }
     if (!cur.empty()) segs.push_back(cur);
     return segs.size() > 3 ? segs[3] : "";
+}
+
+// ---- 桌面提醒通知设置 ----
+HttpResponse Api::handle_reminders_settings(const HttpRequest& req) {
+    std::lock_guard<std::recursive_mutex> lk(Db::mutex());
+    if (req.method == "PUT") {
+        Json body;
+        try { body = Json::parse(req.body); }
+        catch (...) { return HttpResponse::json(400, error_json("JSON 解析失败").dump()); }
+        auto set = [&](const char* key, const std::string& val) {
+            db_.exec("REPLACE INTO settings(key,value) VALUES(" + qstr(key) + "," + qstr(val) + ")");
+        };
+        if (body.has("enabled")) set("reminders_enabled", body["enabled"].as_bool_or(false) ? "1" : "0");
+        if (body.has("defaultMinutes")) set("remind_minutes_default", std::to_string(body["defaultMinutes"].as_int_or(0)));
+        if (body.has("sound")) set("remind_sound", body["sound"].as_bool_or(false) ? "1" : "0");
+        Json resp = Json::object();
+        resp["ok"] = true;
+        return HttpResponse::json(200, resp.dump());
+    }
+    // GET
+    auto get = [&](const char* key, const std::string& def) -> std::string {
+        auto row = db_.query_one("SELECT value FROM settings WHERE key=?", {key});
+        return row ? row->get("value") : def;
+    };
+    Json j = Json::object();
+    j["enabled"] = get("reminders_enabled", "1") != "0";
+    j["defaultMinutes"] = static_cast<long long>(std::strtoll(get("remind_minutes_default", "0").c_str(), nullptr, 10));
+    j["sound"] = get("remind_sound", "1") != "0";
+    return HttpResponse::json(200, j.dump());
+}
+
+HttpResponse Api::handle_reminder_test(const HttpRequest&) {
+    auto snd = db_.query_one("SELECT value FROM settings WHERE key='remind_sound'");
+    bool sound = !snd || snd->get_int("value", 1) != 0;
+    desktop_notify("cpp-todo 提醒测试", "如果你看到这条通知，说明桌面通知已正常工作 ✓", sound);
+    Json j = Json::object();
+    j["ok"] = true;
+#ifdef __APPLE__
+    j["platform"] = "macOS";
+#elif defined(_WIN32)
+    j["platform"] = "Windows";
+#else
+    j["platform"] = "Linux";
+#endif
+    return HttpResponse::json(200, j.dump());
 }
 
 HttpResponse Api::handle_meta(const HttpRequest&) {

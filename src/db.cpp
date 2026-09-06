@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     has_reminder INTEGER DEFAULT 0,
     lunar_remind INTEGER DEFAULT 0,      -- 1=按农历提醒
     lunar_date TEXT,                     -- "M-D"，如 "8-15"
+    due_time TEXT,                       -- HH:MM 截止时间（与 due_date 组合成到期时刻）
+    remind_minutes INTEGER DEFAULT 0,    -- 提前提醒分钟数（0=不提前，按 due_time/remind_time 准时）
+    reminder_fired_at TEXT,              -- 上次已触发提醒的到期时刻(YYYY-MM-DD HH:MM, localtime)，跨重启去重
     project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
     parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
     sort_order INTEGER DEFAULT 0,
@@ -281,6 +284,12 @@ static void migrate_schema(Db& db) {
         db.exec("ALTER TABLE tasks ADD COLUMN est_minutes INTEGER DEFAULT 0");
     if (!cols.count("gave_up_at"))
         db.exec("ALTER TABLE tasks ADD COLUMN gave_up_at TEXT");
+    if (!cols.count("due_time"))
+        db.exec("ALTER TABLE tasks ADD COLUMN due_time TEXT");
+    if (!cols.count("remind_minutes"))
+        db.exec("ALTER TABLE tasks ADD COLUMN remind_minutes INTEGER DEFAULT 0");
+    if (!cols.count("reminder_fired_at"))
+        db.exec("ALTER TABLE tasks ADD COLUMN reminder_fired_at TEXT");
 }
 
 void init_schema(Db& db) {

@@ -15,6 +15,7 @@
 """
 import json
 import os
+import re as _re
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
@@ -309,16 +310,177 @@ def handle_reprioritize(data):
     return _build_success("reprioritize", parsed_fixed, md_fixed)
 
 
+def _clean_predict_markdown(md_text):
+    """清理 predict 模型输出的 Markdown：去掉【第一部分】模板文字、JSON 部分残留与尾部围栏。"""
+    if not isinstance(md_text, str) or not md_text:
+        return md_text
+    import re as _re
+    result = md_text
+    # 删除【第一部分：Markdown 展示文本】及其等价变体
+    result = _re.sub(
+        r"^\s*[#\s]*\【第一部分\s*[：:：—\-]?\s*Markdown\s*展示文本\s*\】[^\n]*\n?",
+        "", result, flags=_re.IGNORECASE | _re.MULTILINE,
+    )
+    result = _re.sub(
+        r"^\s*[#\s]*第一部分\s*[：:：—\-]*\s*(Markdown|展示|展示文本)[^\n]*\n?",
+        "", result, flags=_re.IGNORECASE | _re.MULTILINE,
+    )
+    result = _re.sub(
+        r"^\s*#{1,6}\s*Markdown\s*展示\s*文本\s*$", "", result,
+        flags=_re.IGNORECASE | _re.MULTILINE,
+    )
+    # 裁剪【第二部分 / JSON 结构化数据】之后的所有内容
+    result = _re.sub(
+        r"\n\s*[#\s]*\【第二部分\s*[：:：—\-]?\s*JSON\s*结构化数据\s*\】[\s\S]*$",
+        "", result, flags=_re.IGNORECASE,
+    )
+    result = _re.sub(
+        r"\n\s*[#\s]*第二部分\s*[：:：—\-]\s*(JSON|结构化)[^\n]*[\s\S]*$",
+        "", result, flags=_re.IGNORECASE,
+    )
+    result = _re.sub(
+        r"\n\s*#{1,6}\s*JSON\s*结构化(数据)?\s*$[\s\S]*", "", result,
+        flags=_re.IGNORECASE,
+    )
+    # 删除尾部 ```json ... ``` 围栏
+    result = _re.sub(r"```(?:json)?[\s\S]*?```\s*$", "", result, flags=_re.IGNORECASE)
+    # 去除连续 3 行以上空白行
+    result = _re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
+
+
+def _normalize_predict_todo(t):
+    """清洗单个 predict todo：title 为空但 note 非空时，互换二者；都为空则返回 None。"""
+    if not isinstance(t, dict):
+        return None
+    title = str(t.get("title") or "").strip()
+    note = str(t.get("note") or "").strip()
+    if not title and note:
+        title, note = note, ""
+    if not title:
+        return None
+    due = str(t.get("due") or "").strip()
+    if due and not _re.match(r"\d{4}-\d{2}-\d{2}", due):
+        due = ""
+    pri = int(t.get("priority", 1)) if isinstance(t.get("priority"), (int, float)) else 1
+    if pri not in (0, 1, 2):
+        pri = 1
+    return {"title": title, "note": note, "due": due, "priority": pri}
+
+
+def _dedup_predict_todos(todos, max_total=8):
+    """按 (标题, 备注) 去重并限制总数，保留首次出现顺序；同一 (标题, 备注) 出现多次时取最早截止日。
+
+    这样既能合并不同事件相同的准备工作，又能阻止小模型反复罗列同一任务。
+    """
+    if not isinstance(todos, list):
+        return todos
+    seen = {}  # normalized (title, note) -> index in out
+    out = []
+    for t in todos:
+        t = _normalize_predict_todo(t)
+        if t is None:
+            continue
+        key = (t["title"].lower(), t["note"].lower())
+        due = t["due"]
+        if key not in seen:
+            seen[key] = len(out)
+            out.append(t)
+        elif due:
+            # 更新为更早的截止日期
+            idx = seen[key]
+            existing_due = out[idx].get("due") or ""
+            if not existing_due or due < existing_due:
+                out[idx]["due"] = due
+        if len(out) >= max_total:
+            break
+    return out
+
+
+def _parse_predict_markdown(md_text):
+    """当 JSON 围栏缺失/损坏时，从 predict Markdown 中解析 todos 兜底。
+
+    同时兼容两种模型输出习惯：
+      - 标准列表项：`- **标题** 📅... ⚑... — ...`
+      - 无列表标记行：`标题 📅... ⚑... — ...`
+    """
+    if not isinstance(md_text, str) or not md_text:
+        return None
+    import re as _re
+
+    def _make_todo(m):
+        title = m.group(1).strip() if m.group(1) else ""
+        due = m.group(2) or ""
+        pri_cn = m.group(3) or "中"
+        note = m.group(4).strip() if m.group(4) else ""
+        if title in ("待办标题", "待办", "标题", "提前准备的待办"):
+            title = ""
+        pri = {"高": 2, "中": 1, "低": 0}.get(pri_cn, 1)
+        return _normalize_predict_todo({"title": title, "due": due, "priority": pri, "note": note})
+
+    # 模式 1：标准列表项（可带 ** 或 < >）
+    list_pattern = _re.compile(
+        r"^[ \t]*[-*][ \t]*(?:\*\*|\<)?[ \t]*([^*<>\n]+?)[ \t]*(?:\*\*|\>)?[ \t]*"
+        r"(?:📅[ \t]*(\d{4}-\d{2}-\d{2}))[ \t]*"
+        r"(?:⚑[ \t]*([高中低]))?[ \t]*"
+        r"(?:[—–—\-][ \t]*(.+?))?[ \t]*$",
+        _re.MULTILINE,
+    )
+    todos = []
+    for m in list_pattern.finditer(md_text):
+        t = _make_todo(m)
+        if t:
+            todos.append(t)
+    if todos:
+        return {"todos": todos}
+
+    # 模式 2：无列表标记的普通行，只要包含 📅 与 ⚑ 即可
+    plain_pattern = _re.compile(
+        r"^[ \t]*([^📅⚑\n]+?)[ \t]*"
+        r"(?:📅[ \t]*(\d{4}-\d{2}-\d{2}))[ \t]*"
+        r"(?:⚑[ \t]*([高中低]))[ \t]*"
+        r"(?:[—–—\-][ \t]*(.+?))?[ \t]*$",
+        _re.MULTILINE,
+    )
+    for m in plain_pattern.finditer(md_text):
+        t = _make_todo(m)
+        if t:
+            todos.append(t)
+    if not todos:
+        return None
+    return {"todos": todos}
+
+
 def handle_predict(data):
     events = data.get("events")
     if not isinstance(events, list):
         return 400, {"error": "missing 'events' list"}
+    if not events:
+        return 400, {"error": "events list is empty"}
     system, user = predict_prompt(events)
     out = llm.chat(system, user)
     md_text, parsed = _safe_parse(out, ["todos"])
+    md_clean = _clean_predict_markdown(md_text or "")
+
     if parsed is None:
-        return 200, {"todos": [], "markdown": md_text or out, "warning": "structured_data_unavailable"}
-    return _build_success("predict", parsed, md_text)
+        # JSON 解析失败：尝试从 Markdown 列表中抽取待办，否则仅返回清理后的 Markdown
+        parsed = _parse_predict_markdown(md_clean) or _parse_predict_markdown(out or "")
+        if parsed is not None:
+            parsed["todos"] = _dedup_predict_todos(parsed.get("todos", []))
+            md_clean = build_fallback_markdown("predict", parsed)
+            return _build_success("predict", parsed, md_clean)
+        return 200, {"todos": [], "markdown": md_clean or out, "warning": "structured_data_unavailable"}
+
+    todos = _dedup_predict_todos(parsed.get("todos", []))
+    # JSON 解析成功但 todos 全部为空/无效时，回退到从 Markdown 中抽取
+    if not todos and (md_clean.strip() or out.strip()):
+        parsed_md = _parse_predict_markdown(md_clean) or _parse_predict_markdown(out or "")
+        if parsed_md:
+            todos = _dedup_predict_todos(parsed_md.get("todos", []))
+    parsed["todos"] = todos
+    # 始终从结构化 todos 重建 Markdown，避免展示模型重复/截断的原始文本
+    md_clean = build_fallback_markdown("predict", parsed)
+    return _build_success("predict", parsed, md_clean)
 
 
 ROUTES = {

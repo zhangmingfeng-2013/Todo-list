@@ -329,6 +329,7 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
 .m-chip.lunar { color: #9d4b00; background: var(--panel)6e9; border-color: #fcd9a6; }
 .m-chip.repeat { color: var(--primary); background: var(--primary-weak); border-color: #c6d9fb; }
 .m-chip.project { color: var(--text-2); }
+.m-chip.rem { color: #7a3fb5; background: #f6effd; border-color: #e3cdf5; font-weight: 500; }
 .m-chip .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 
 .tag-pill {

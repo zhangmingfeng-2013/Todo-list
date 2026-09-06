@@ -392,6 +392,13 @@ function taskMeta(t) {
   if (t.lunarRemind && t.lunarDate) {
     chips.push('<span class="m-chip lunar">🏮 ' + esc(t.lunarText || t.lunarDate) + '</span>');
   }
+  if (t.hasReminder) {
+    let rt = '🔔';
+    if (t.remindMinutes > 0) rt += ' 提前' + t.remindMinutes + '分';
+    else if (t.dueTime) rt += ' ' + t.dueTime;
+    else if (t.remindTime) rt += ' ' + t.remindTime;
+    chips.push('<span class="m-chip rem" title="已开启桌面提醒（系统原生弹窗）">' + rt + '</span>');
+  }
   if (t.repeatRule && t.repeatRule.freq) {
     chips.push('<span class="m-chip repeat">↻ ' + esc(repeatText(t.repeatRule)) + '</span>');
   }
@@ -2253,6 +2260,10 @@ async function openTaskEditor(task, forceNew) {
 
   const body = document.createElement('div');
   const form = document.createElement('div');
+  // 提前提醒可选值：[分钟, 文案]
+  var ADV = [[0,'准时（到期时刻）'],[5,'提前 5 分钟'],[10,'提前 10 分钟'],[15,'提前 15 分钟'],
+             [30,'提前 30 分钟'],[60,'提前 1 小时'],[120,'提前 2 小时'],[1440,'提前 1 天']];
+  var remindMin = (t.remindMinutes || 0);
   form.innerHTML =
     '<div class="tf-grid">' +
     '<div class="tf tf-full"><label>标题 *</label><input id="tf-title" value="' + esc(t.title || '') + '" placeholder="要做什么？"></div>' +
@@ -2287,7 +2298,11 @@ async function openTaskEditor(task, forceNew) {
 
     '<div class="tf"><label>截止日期</label><input type="date" id="tf-due" value="' + esc(t.dueDate || '') + '"></div>' +
     '<div class="tf"><label>开始日期</label><input type="date" id="tf-start" value="' + esc(t.startDate || '') + '"></div>' +
-    '<div class="tf"><label>时间提醒</label><input type="time" id="tf-time" value="' + esc(t.remindTime || '') + '"></div>' +
+    '<div class="tf"><label>截止时间</label><input type="time" id="tf-duetime" value="' + esc(t.dueTime || '') + '"></div>' +
+    '<div class="tf"><label>提前提醒</label><select id="tf-advance">' +
+      ADV.map(function(o){ return '<option value="' + o[0] + '"' + (remindMin === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
+    '</select></div>' +
+    '<div class="tf tf-full"><label>时间提醒（旧·固定时刻）</label><input type="time" id="tf-time" value="' + esc(t.remindTime || '') + '"><span class="hint">留空则按「截止时间」触发；与「提前提醒」可叠加（取最早者）</span></div>' +
     '<div class="tf"><label>项目</label><select id="tf-project"><option value="0">（无）</option>' +
     S.projects.map(p => '<option value="' + p.id + '"' + (t.projectId === p.id ? ' selected' : '') + '>' +
       esc(p.name) + '</option>').join('') + '</select></div>' +
@@ -2604,6 +2619,8 @@ function collectTask(t) {
   const lunarDate = v('#tf-lunar').trim();
   const hasLunar = ck('#tf-lunar-ck') && lunarDate !== '';
   const remindTime = v('#tf-time');
+  const dueTime = v('#tf-duetime');
+  const remindMinutes = parseInt(v('#tf-advance'), 10) || 0;
 
   const payload = {
     title: v('#tf-title').trim(),
@@ -2612,8 +2629,10 @@ function collectTask(t) {
     status: v('#tf-status'),
     startDate: v('#tf-start'),
     dueDate: v('#tf-due'),
+    dueTime: dueTime,
     remindTime: remindTime,
-    hasReminder: ck('#tf-lunar-ck') ? (!!remindTime || hasLunar) : !!remindTime,
+    remindMinutes: remindMinutes,
+    hasReminder: !!(dueTime || remindMinutes || remindTime || hasLunar),
     lunarRemind: hasLunar,
     lunarDate: hasLunar ? lunarDate : '',
     projectId: parseInt(v('#tf-project'), 10),
@@ -2702,6 +2721,68 @@ function fmtBytes(n) {
   if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
   if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
   return n + ' B';
+}
+
+async function openReminderSettings() {
+  const body = document.createElement('div');
+  body.innerHTML = '<div class="loading">读取提醒设置…</div>';
+
+  const foot = document.createElement('div');
+  foot.style.cssText = 'display:flex;gap:8px;width:100%';
+  const btnCancel = document.createElement('button');
+  btnCancel.className = 'btn';
+  btnCancel.textContent = '关闭';
+  btnCancel.addEventListener('click', closeModal);
+  const btnSave = document.createElement('button');
+  btnSave.className = 'btn btn-primary';
+  btnSave.textContent = '保存';
+  foot.appendChild(btnCancel);
+  foot.appendChild(btnSave);
+  openModal('桌面提醒通知', body, foot);
+
+  let cfg;
+  try { cfg = await api('GET', '/api/reminders/settings'); }
+  catch (e) { body.innerHTML = '<div class="empty-tip">读取失败：' + esc(e.message) + '</div>'; return; }
+
+  const ADV = [[0,'准时（到期时刻）'],[5,'提前 5 分钟'],[10,'提前 10 分钟'],[15,'提前 15 分钟'],
+               [30,'提前 30 分钟'],[60,'提前 1 小时'],[120,'提前 2 小时'],[1440,'提前 1 天']];
+  const plat = (navigator.platform || '').toLowerCase();
+  const platName = /win/.test(plat) ? 'Windows' : /mac/.test(plat) ? 'macOS' : 'Linux';
+  body.innerHTML =
+    '<div class="rem-set">' +
+    '<p class="hint" style="margin-top:0">任务到达「截止时间 − 提前量」时，通过系统原生通知弹窗提醒你（当前：' + platName +
+      '）。需保持 cpp-todo 服务运行才会推送。</p>' +
+    '<div class="tf-check"><input type="checkbox" id="rs-enabled"' + (cfg.enabled ? ' checked' : '') + '><label>开启桌面提醒</label></div>' +
+    '<div class="tf"><label>默认提前提醒</label><select id="rs-default">' +
+      ADV.map(function(o){ return '<option value="' + o[0] + '"' + (cfg.defaultMinutes === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
+    '</select><span class="hint">新建任务时预填的提前量</span></div>' +
+    '<div class="tf-check"><input type="checkbox" id="rs-sound"' + (cfg.sound ? ' checked' : '') + '><label>macOS 附带提示音</label></div>' +
+    '<div style="margin-top:10px"><button type="button" class="btn btn-sm" id="rs-test">发送测试通知</button>' +
+      '<span id="rs-test-msg" class="hint" style="margin-left:8px"></span></div>' +
+    '</div>';
+
+  $('#rs-test', body).addEventListener('click', async () => {
+    const m = $('#rs-test-msg', body);
+    m.textContent = '发送中…';
+    try {
+      const r = await api('POST', '/api/reminders/test');
+      m.textContent = '已发送（' + (r.platform || '?') + '）';
+      toast('测试通知已发送，请查看桌面 ✓', 'ok');
+    } catch (e) { m.textContent = '失败：' + esc(e.message); toast('测试通知失败', 'err'); }
+  });
+
+  btnSave.addEventListener('click', async () => {
+    const payload = {
+      enabled: $('#rs-enabled', body).checked,
+      defaultMinutes: parseInt($('#rs-default', body).value, 10) || 0,
+      sound: $('#rs-sound', body).checked
+    };
+    try {
+      await api('PUT', '/api/reminders/settings', payload);
+      toast('提醒设置已保存', 'ok');
+      closeModal();
+    } catch (e) { toast('保存失败：' + esc(e.message), 'err'); }
+  });
 }
 
 async function openStorageModal() {
@@ -2955,6 +3036,7 @@ function bindEvents() {
     if (!b) return;
     if (b.dataset.view) switchView(b.dataset.view);
     else if (b.dataset.act === 'open-pomo') showPomodoro();
+    else if (b.dataset.act === 'open-reminder-settings') openReminderSettings();
   });
 
   // 新建 / 导入 / 存储 / 主题 / 导出 / 命令面板

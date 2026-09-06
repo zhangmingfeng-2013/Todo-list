@@ -5,6 +5,10 @@
 #include "db.hpp"
 #include "http.hpp"
 
+// 跨平台原生桌面通知（macOS / Linux / Windows）。
+// sound=true 时 macOS 附带提示音；返回是否成功触发。
+void desktop_notify(const std::string& title, const std::string& msg, bool sound = true);
+
 class Api {
 public:
     Api(Db& db, const std::string& static_root);
@@ -51,6 +55,9 @@ private:
     HttpResponse handle_holidays(const HttpRequest& req);
     HttpResponse handle_search(const HttpRequest& req);
     HttpResponse handle_meta(const HttpRequest& req);
+    // ---- 桌面提醒通知 ----
+    HttpResponse handle_reminders_settings(const HttpRequest& req); // GET/PUT 总开关/默认提前/声音
+    HttpResponse handle_reminder_test(const HttpRequest& req);      // POST 发送测试通知
     // ---- 批次 B/C 新增 ----
     HttpResponse handle_undo(const HttpRequest& req);        // POST 撤销最近一次写操作 / GET 查询可撤销项
     HttpResponse handle_repeat_preview(const HttpRequest& req); // POST 重复规则预览（未来 N 次）
